@@ -1,0 +1,9 @@
+# Tylko dodatkowe paczki dla Airflow DAGów
+# NIE nadpisujemy sqlalchemy/psycopg2 — Airflow ma swoje wersje
+
+owslib==0.31.0
+geopandas==1.0.1
+shapely==2.0.6
+pyproj==3.7.0
+fiona==1.10.1
+geoalchemy2==0.15.2

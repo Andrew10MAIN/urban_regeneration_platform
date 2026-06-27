@@ -6,6 +6,7 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
   AIRFLOW_CONN_URBAN_DB: postgresql+psycopg2://urban_user:urban_password@postgis:5432/urban_db
+  DATABASE_URL: postgresql+psycopg2://urban_user:urban_password@postgis:5432/urban_db
 
 services:
 
@@ -43,16 +44,17 @@ services:
       - ./logs/airflow:/opt/airflow/logs
       - ./docker/airflow/plugins:/opt/airflow/plugins
       - .:/opt/airflow/urban_platform
-      - ./requirements.txt:/requirements.txt
+      - ./requirements-airflow.txt:/requirements-airflow.txt
     depends_on:
       postgis:
         condition: service_healthy
-    command: >
-      bash -c "pip install -r /requirements.txt --quiet &&
-               airflow db migrate &&
-               airflow users create --username admin --password admin
-                 --firstname Urban --lastname Admin
-                 --role Admin --email admin@urban.local || true"
+    command:
+      - bash
+      - -c
+      - |
+        pip install -r /requirements-airflow.txt --quiet
+        airflow db migrate
+        airflow users create --username admin --password admin --firstname Urban --lastname Admin --role Admin --email admin@urban.local || true
     profiles:
       - etl
 
@@ -66,14 +68,18 @@ services:
       - ./logs/airflow:/opt/airflow/logs
       - ./docker/airflow/plugins:/opt/airflow/plugins
       - .:/opt/airflow/urban_platform
-      - ./requirements.txt:/requirements.txt
+      - ./requirements-airflow.txt:/requirements-airflow.txt
     depends_on:
       postgis:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-    command: >
-      bash -c "pip install -r /requirements.txt --quiet && airflow scheduler"
+    command:
+      - bash
+      - -c
+      - |
+        pip install -r /requirements-airflow.txt --quiet
+        airflow scheduler
     restart: unless-stopped
     profiles:
       - etl
@@ -88,7 +94,7 @@ services:
       - ./logs/airflow:/opt/airflow/logs
       - ./docker/airflow/plugins:/opt/airflow/plugins
       - .:/opt/airflow/urban_platform
-      - ./requirements.txt:/requirements.txt
+      - ./requirements-airflow.txt:/requirements-airflow.txt
     ports:
       - "8080:8080"
     depends_on:
@@ -96,8 +102,12 @@ services:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-    command: >
-      bash -c "pip install -r /requirements.txt --quiet && airflow webserver"
+    command:
+      - bash
+      - -c
+      - |
+        pip install -r /requirements-airflow.txt --quiet
+        airflow webserver
     restart: unless-stopped
     profiles:
       - etl
