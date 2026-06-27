@@ -1,0 +1,150 @@
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://urban_user:urban_password@postgis:5432/airflow_db
+  AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
+  AIRFLOW__WEBSERVER__SECRET_KEY: 'urban_platform_secret_key'
+  AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+  AIRFLOW_CONN_URBAN_DB: postgresql+psycopg2://urban_user:urban_password@postgis:5432/urban_db
+
+services:
+
+  # ─────────────────────────────────────────
+  # DATABASE
+  # ─────────────────────────────────────────
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: urban_platform_db
+    environment:
+      POSTGRES_DB: urban_db
+      POSTGRES_USER: urban_user
+      POSTGRES_PASSWORD: urban_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U urban_user -d urban_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # AIRFLOW (ETL pipeline) — profile: etl
+  # ─────────────────────────────────────────
+  airflow-init:
+    image: apache/airflow:2.10.3-python3.12
+    container_name: urban_platform_airflow_init
+    environment:
+      <<: *airflow-env
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs/airflow:/opt/airflow/logs
+      - ./docker/airflow/plugins:/opt/airflow/plugins
+      - .:/opt/airflow/urban_platform
+      - ./requirements.txt:/requirements.txt
+    depends_on:
+      postgis:
+        condition: service_healthy
+    command: >
+      bash -c "pip install -r /requirements.txt --quiet &&
+               airflow db migrate &&
+               airflow users create --username admin --password admin
+                 --firstname Urban --lastname Admin
+                 --role Admin --email admin@urban.local || true"
+    profiles:
+      - etl
+
+  airflow-scheduler:
+    image: apache/airflow:2.10.3-python3.12
+    container_name: urban_platform_airflow_scheduler
+    environment:
+      <<: *airflow-env
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs/airflow:/opt/airflow/logs
+      - ./docker/airflow/plugins:/opt/airflow/plugins
+      - .:/opt/airflow/urban_platform
+      - ./requirements.txt:/requirements.txt
+    depends_on:
+      postgis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: >
+      bash -c "pip install -r /requirements.txt --quiet && airflow scheduler"
+    restart: unless-stopped
+    profiles:
+      - etl
+
+  airflow-webserver:
+    image: apache/airflow:2.10.3-python3.12
+    container_name: urban_platform_airflow_webserver
+    environment:
+      <<: *airflow-env
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs/airflow:/opt/airflow/logs
+      - ./docker/airflow/plugins:/opt/airflow/plugins
+      - .:/opt/airflow/urban_platform
+      - ./requirements.txt:/requirements.txt
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: >
+      bash -c "pip install -r /requirements.txt --quiet && airflow webserver"
+    restart: unless-stopped
+    profiles:
+      - etl
+
+  # ─────────────────────────────────────────
+  # STREAMLIT — profile: app
+  # ─────────────────────────────────────────
+  streamlit:
+    build:
+      context: .
+      dockerfile: docker/streamlit/Dockerfile
+    container_name: urban_platform_streamlit
+    environment:
+      DB_HOST: postgis
+      DB_PORT: 5432
+      DB_NAME: urban_db
+      DB_USER: urban_user
+      DB_PASSWORD: urban_password
+      DATABASE_URL: postgresql+psycopg2://urban_user:urban_password@postgis:5432/urban_db
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+    depends_on:
+      postgis:
+        condition: service_healthy
+    profiles:
+      - app
+
+  # ─────────────────────────────────────────
+  # ML PIPELINE — profile: ml
+  # ─────────────────────────────────────────
+  ml:
+    build:
+      context: .
+      dockerfile: docker/python/Dockerfile
+    container_name: urban_platform_ml
+    environment:
+      DATABASE_URL: postgresql+psycopg2://urban_user:urban_password@postgis:5432/urban_db
+    volumes:
+      - .:/app
+    depends_on:
+      postgis:
+        condition: service_healthy
+    command: ["python", "src/ml/run_pipeline.py"]
+    profiles:
+      - ml
+
+volumes:
+  postgres_data:
