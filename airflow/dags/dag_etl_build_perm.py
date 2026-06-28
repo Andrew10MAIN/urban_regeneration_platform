@@ -24,15 +24,17 @@ import sys
 import logging
 from datetime import datetime, timedelta
 
+# Global src/ (config, ml, ...) + airflow/ ETL modules
 sys.path.insert(0, "/opt/airflow/urban_platform")
+sys.path.insert(0, "/opt/airflow/urban_platform/airflow")
 
 from airflow.decorators import dag, task
 from airflow.utils.dates import days_ago
 
 from src.config.db import get_engine
-from src.extract.build_perm import extract
-from src.transform.build_perm import transform_pipeline
-from src.load.build_perm import (
+from extract.build_perm import extract
+from transform.build_perm import transform_pipeline
+from load.build_perm import (
     create_run_log,
     stage_raw,
     compute_diff,

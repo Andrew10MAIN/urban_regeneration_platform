@@ -24,16 +24,16 @@ VAR_DESC     = "The number of the issued building permits in a particular urban 
 # Run log
 # ---------------------------------------------------------------------------
 
-def create_run_log(engine: Engine, dag_id: str = "etl_build_perm") -> int:
+def create_run_log(engine: Engine, dag_id: str = "etl_build_perm", source: str = "Geoportal GUNB WFS") -> int:
     """Tworzy wpis w audit.etl_log, zwraca run_id."""
     with engine.begin() as conn:
         result = conn.execute(
             text("""
                 INSERT INTO audit.etl_log (dag_id, source, started_at, status)
-                VALUES (:dag_id, 'Geoportal GUNB WFS', NOW(), 'running')
+                VALUES (:dag_id, :source, NOW(), 'running')
                 RETURNING run_id
             """),
-            {"dag_id": dag_id}
+            {"dag_id": dag_id, "source": source}
         )
         run_id = result.scalar()
     log.info("Utworzono run_id=%d", run_id)

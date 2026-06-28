@@ -40,7 +40,7 @@ services:
     environment:
       <<: *airflow-env
     volumes:
-      - ./dags:/opt/airflow/dags
+      - ./airflow/dags:/opt/airflow/dags
       - ./logs/airflow:/opt/airflow/logs
       - ./docker/airflow/plugins:/opt/airflow/plugins
       - .:/opt/airflow/urban_platform
@@ -64,7 +64,7 @@ services:
     environment:
       <<: *airflow-env
     volumes:
-      - ./dags:/opt/airflow/dags
+      - ./airflow/dags:/opt/airflow/dags
       - ./logs/airflow:/opt/airflow/logs
       - ./docker/airflow/plugins:/opt/airflow/plugins
       - .:/opt/airflow/urban_platform
@@ -90,7 +90,7 @@ services:
     environment:
       <<: *airflow-env
     volumes:
-      - ./dags:/opt/airflow/dags
+      - ./airflow/dags:/opt/airflow/dags
       - ./logs/airflow:/opt/airflow/logs
       - ./docker/airflow/plugins:/opt/airflow/plugins
       - .:/opt/airflow/urban_platform

@@ -7,3 +7,5 @@ shapely==2.0.6
 pyproj==3.7.0
 fiona==1.10.1
 geoalchemy2==0.15.2
+osmnx>=2.0,<3
+openpyxl==3.1.5
