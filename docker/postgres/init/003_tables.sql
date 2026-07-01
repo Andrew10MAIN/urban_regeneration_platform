@@ -20,19 +20,6 @@ CREATE TABLE IF NOT EXISTS core.urban_blocks_geom (
 
 
 -- =========================
--- LEGACY
--- =========================
-
-CREATE TABLE IF NOT EXISTS legacy.variables (
-    var_id   TEXT,
-    year     TIMESTAMP,
-    block_id BIGINT,
-    value    DOUBLE PRECISION,
-    PRIMARY KEY (var_id, year, block_id)
-);
-
-
--- =========================
 -- META
 -- =========================
 
@@ -82,14 +69,29 @@ CREATE TABLE IF NOT EXISTS mined."Build_perm" (
 );
 
 CREATE TABLE IF NOT EXISTS mined.adresses (
-    adress   TEXT PRIMARY KEY,
-    block_id BIGINT
+    gml_id      TEXT PRIMARY KEY,
+    guid        TEXT,
+    full_adress TEXT,
+    street      TEXT,
+    building_no TEXT,
+    zip_code    TEXT,
+    status      TEXT,
+    geometry    GEOMETRY(Point, 2177)
 );
 
 CREATE TABLE IF NOT EXISTS mined.penalties (
-    pen_id BIGINT PRIMARY KEY,
-    adress TEXT,
-    date   TIMESTAMP
+    pen_id           BIGINT PRIMARY KEY,
+    date             TIMESTAMP,
+    place_of_penalty TEXT,
+    pen_type         TEXT,
+    geometry         GEOMETRY(Point, 2177)
+);
+
+CREATE TABLE IF NOT EXISTS mined.buildings (
+    building_id          TEXT PRIMARY KEY,
+    floors_above_ground  INTEGER,
+    floors_below_ground  INTEGER,
+    geometry             GEOMETRY(Geometry, 2177)
 );
 
 CREATE TABLE IF NOT EXISTS mined.app_prices (
@@ -97,16 +99,6 @@ CREATE TABLE IF NOT EXISTS mined.app_prices (
     geometry GEOMETRY(Point, 2177),
     price    DOUBLE PRECISION,
     area     DOUBLE PRECISION
-);
-
-CREATE TABLE IF NOT EXISTS mined.buildings (
-    build_id    TEXT PRIMARY KEY,
-    valid_from  TIMESTAMP,
-    valid_until TIMESTAMP,
-    area        DOUBLE PRECISION,
-    height      INTEGER,
-    geometry    GEOMETRY(MultiPolygon, 2177),
-    centroid    GEOMETRY(Point, 2177)
 );
 
 
@@ -194,8 +186,69 @@ CREATE TABLE IF NOT EXISTS audit.stg_build_perm (
     build_plot_no TEXT,
     issue_date    DATE,
     description   TEXT,
+    block_id      BIGINT,
     geometry      GEOMETRY(Point, 2177),
     loaded_at     TIMESTAMP DEFAULT NOW()
 );
-
 CREATE INDEX IF NOT EXISTS idx_stg_build_perm_run ON audit.stg_build_perm(run_id);
+
+CREATE TABLE IF NOT EXISTS audit.stg_addresses (
+    id          SERIAL,
+    run_id      INTEGER REFERENCES audit.etl_log(run_id),
+    gml_id      TEXT,
+    guid        TEXT,
+    full_adress TEXT,
+    street      TEXT,
+    building_no TEXT,
+    zip_code    TEXT,
+    status      TEXT,
+    geometry    GEOMETRY(Point, 2177),
+    loaded_at   TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_stg_addresses_run ON audit.stg_addresses(run_id);
+
+CREATE TABLE IF NOT EXISTS audit.stg_penalties (
+    id               SERIAL,
+    run_id           INTEGER REFERENCES audit.etl_log(run_id),
+    source_file      TEXT,
+    pen_id           BIGINT,
+    date             TIMESTAMP,
+    place_of_penalty TEXT,
+    pen_type         TEXT,
+    geometry         GEOMETRY(Point, 2177),
+    loaded_at        TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_stg_penalties_run ON audit.stg_penalties(run_id);
+
+CREATE TABLE IF NOT EXISTS audit.processed_files (
+    id           SERIAL PRIMARY KEY,
+    dag_id       TEXT NOT NULL,
+    file_name    TEXT NOT NULL,
+    file_hash    TEXT,
+    processed_at TIMESTAMP DEFAULT NOW(),
+    run_id       INTEGER,
+    UNIQUE (dag_id, file_name)
+);
+
+CREATE TABLE IF NOT EXISTS audit.stg_buildings (
+    id                   SERIAL,
+    run_id               INTEGER REFERENCES audit.etl_log(run_id),
+    building_id          TEXT,
+    floors_above_ground  INTEGER,
+    floors_below_ground  INTEGER,
+    geometry             GEOMETRY(Geometry, 2177),
+    loaded_at            TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_stg_buildings_run ON audit.stg_buildings(run_id);
+
+CREATE TABLE IF NOT EXISTS audit.stg_building_vars (
+    id          SERIAL PRIMARY KEY,
+    run_id      INTEGER REFERENCES audit.etl_log(run_id),
+    var_id      TEXT,
+    year        TIMESTAMP,
+    block_id    BIGINT,
+    value       DOUBLE PRECISION,
+    computed_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_stg_building_vars_run  ON audit.stg_building_vars(run_id);
+CREATE INDEX IF NOT EXISTS idx_stg_building_vars_year ON audit.stg_building_vars(var_id, year);

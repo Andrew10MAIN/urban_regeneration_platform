@@ -1,6 +1,6 @@
 """
 DAG: etl_buildings
-Pipeline ETL dla budynków Łodzi z WFS EGiB.
+Pipeline ETL dla budynków Łodzi z WFS EGiB + agregacja zmiennych do mined.variables.
 
 Przepływ:
   setup_schema
@@ -9,14 +9,20 @@ Przepływ:
       ↓
   fetch_stage_buildings    (WFS EGiB → audit.stg_buildings)
       ↓
-  load_buildings           (stg → mined.buildings)
+  load_buildings           (stg → mined.buildings, ON CONFLICT DO UPDATE)
+      ↓
+  compute_variables        (mined.buildings → mined.variables, rok bieżący)
+      ↓
+  ensure_metadata          (meta.var_description)
       ↓
   finalize_run             (audit.etl_log ← status końcowy)
 
-Źródło: mapa.lodz.pl/OGC/EGiB — warstwa ms:budynki
-Śledzenie: audit.etl_log (wspólne z innymi DAGami)
-Staging:   audit.stg_buildings
-Docelowa:  mined.buildings
+Zmienne:
+  bdEnvFtxx_arrt_00000000  — powierzchnia zabudowy  [m²]  = SUM(area)
+  bdEnvFRxx_arrt_00000000  — gęstość zabudowy       [m²]  = SUM(area × kondygnacje)
+
+Rok: bieżący rok kalendarzowy → YYYY-01-01.
+Tabela pomocnicza zmian: audit.stg_building_vars (append każdego runu).
 """
 
 import sys
@@ -32,7 +38,13 @@ from airflow.utils.dates import days_ago
 from src.config.db import get_engine
 from extract.buildings import fetch_buildings
 from transform.buildings import transform_buildings
-from load.buildings import ensure_tables, stage_buildings, upsert_buildings
+from load.buildings import (
+    ensure_tables,
+    stage_buildings,
+    upsert_buildings,
+    aggregate_buildings_to_variables,
+    upsert_building_metadata,
+)
 from load.build_perm import create_run_log, finalize_run_log
 
 log = logging.getLogger(__name__)
@@ -49,7 +61,7 @@ DEFAULT_ARGS = {
 
 @dag(
     dag_id=DAG_ID,
-    description="ETL: Budynki Łódź WFS EGiB → mined.buildings",
+    description="ETL: Budynki WFS EGiB → mined.buildings + mined.variables (bdEnvFtxx / bdEnvFRxx)",
     schedule=None,
     start_date=days_ago(1),
     catchup=False,
@@ -70,10 +82,7 @@ def etl_buildings():
 
     @task
     def fetch_stage_buildings(etl_run_id: int) -> dict:
-        """
-        Pobiera budynki z WFS EGiB dla bbox obszaru badań.
-        Transformuje i zapisuje do audit.stg_buildings.
-        """
+        """Pobiera budynki z WFS EGiB i zapisuje do audit.stg_buildings."""
         import geopandas as gpd
         engine = get_engine()
 
@@ -81,7 +90,7 @@ def etl_buildings():
             "SELECT block_id, geometry FROM core.urban_blocks_geom",
             engine, geom_col="geometry"
         )
-        bbox_2177 = tuple(blocks_gdf.total_bounds)  # (minx, miny, maxx, maxy) w EPSG:2177
+        bbox_2177 = tuple(blocks_gdf.total_bounds)
 
         raw_gdf = fetch_buildings(bbox_2177)
         transformed = transform_buildings(raw_gdf)
@@ -91,15 +100,32 @@ def etl_buildings():
 
     @task
     def load_buildings(etl_run_id: int, fetch_stats: dict) -> int:
-        """
-        Upsert z audit.stg_buildings → mined.buildings.
-        Przyjmuje fetch_stats tylko po to, żeby wymusić sekwencję po fetch_stage_buildings.
-        """
+        """Upsert audit.stg_buildings → mined.buildings."""
         engine = get_engine()
         return upsert_buildings(engine, etl_run_id)
 
     @task
-    def finalize(etl_run_id: int, fetch_stats: dict, rows_loaded: int) -> None:
+    def compute_variables(etl_run_id: int, rows_loaded: int) -> int:
+        """
+        Agreguje powierzchnię zabudowy i gęstość per block → mined.variables.
+        Rok = bieżący rok kalendarzowy (YYYY-01-01).
+        Audit trail → audit.stg_building_vars.
+        """
+        engine = get_engine()
+        return aggregate_buildings_to_variables(engine, etl_run_id)
+
+    @task
+    def ensure_metadata() -> None:
+        engine = get_engine()
+        upsert_building_metadata(engine)
+
+    @task
+    def finalize(
+        etl_run_id: int,
+        fetch_stats: dict,
+        rows_loaded: int,
+        rows_vars: int,
+    ) -> None:
         engine = get_engine()
         rows_staged = fetch_stats.get("rows_staged", 0)
         finalize_run_log(
@@ -113,14 +139,16 @@ def etl_buildings():
         )
 
     # ── Wiring ───────────────────────────────────────────────────────────────
-    # setup → create_run → fetch_stage → load → finalize
-    _setup      = setup_schema()
-    etl_run_id  = create_run()
-    fetch_stats = fetch_stage_buildings(etl_run_id)
-    rows_loaded = load_buildings(etl_run_id, fetch_stats)  # sekwencyjnie po fetch
+    # setup → run → fetch → load → compute_vars → metadata → finalize
+    _setup       = setup_schema()
+    etl_run_id   = create_run()
+    fetch_stats  = fetch_stage_buildings(etl_run_id)
+    rows_loaded  = load_buildings(etl_run_id, fetch_stats)   # sekwencyjnie po fetch
+    rows_vars    = compute_variables(etl_run_id, rows_loaded) # sekwencyjnie po load
+    _meta        = ensure_metadata()
 
     _setup >> etl_run_id
-    rows_loaded >> finalize(etl_run_id, fetch_stats, rows_loaded)
+    rows_vars >> _meta >> finalize(etl_run_id, fetch_stats, rows_loaded, rows_vars)
 
 
 etl_buildings()
