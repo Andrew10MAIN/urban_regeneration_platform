@@ -7,7 +7,7 @@ __pycache__/
 venv/
 
 # Data — nie commitujemy surowych danych
-data/source/
+#data/source/
 data/raw/
 data/processed/
 
