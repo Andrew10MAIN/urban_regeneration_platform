@@ -95,10 +95,15 @@ CREATE TABLE IF NOT EXISTS mined.buildings (
 );
 
 CREATE TABLE IF NOT EXISTS mined.app_prices (
-    build_id TEXT,
-    geometry GEOMETRY(Point, 2177),
-    price    DOUBLE PRECISION,
-    area     DOUBLE PRECISION
+    gml_id      TEXT PRIMARY KEY,
+    res_unit_id TEXT,
+    building_id TEXT,
+    date        TIMESTAMP,
+    floor_no    DOUBLE PRECISION,
+    floor_area  DOUBLE PRECISION,
+    price_gross DOUBLE PRECISION,
+    block_id    BIGINT,
+    geometry    GEOMETRY(Point, 2177)
 );
 
 
@@ -252,3 +257,19 @@ CREATE TABLE IF NOT EXISTS audit.stg_building_vars (
 );
 CREATE INDEX IF NOT EXISTS idx_stg_building_vars_run  ON audit.stg_building_vars(run_id);
 CREATE INDEX IF NOT EXISTS idx_stg_building_vars_year ON audit.stg_building_vars(var_id, year);
+
+CREATE TABLE IF NOT EXISTS audit.stg_app_prices (
+    id          SERIAL,
+    run_id      INTEGER REFERENCES audit.etl_log(run_id),
+    gml_id      TEXT,
+    res_unit_id TEXT,
+    building_id TEXT,
+    date        TIMESTAMP,
+    floor_no    DOUBLE PRECISION,
+    floor_area  DOUBLE PRECISION,
+    price_gross DOUBLE PRECISION,
+    block_id    BIGINT,
+    geometry    GEOMETRY(Point, 2177),
+    loaded_at   TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_stg_app_prices_run ON audit.stg_app_prices(run_id);

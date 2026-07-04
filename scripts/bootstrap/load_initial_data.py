@@ -16,6 +16,8 @@ Czyści dane i ładuje od nowa (NIE dotyka tabel audit/etl_log).
   5. meta.var_description  ← metadane zmiennych (z parquet)
   6. mined.variables       ← Census 2021 socVrPopt_coun_00000000
   7. meta.var_description  ← metadane Census
+  8. mined.app_prices      ← historyczne transakcje mieszkaniowe (GeoJSON 2015-2025)
+  9. mined.variables       ← socVrAS00_avrg_00000000 (średnia cena/m² per block/year)
 """
 
 import numpy as np
@@ -33,21 +35,30 @@ print("Bootstrap: start")
 print("=" * 60)
 
 # ─── Czyszczenie (kolejność ważna — FK constraints) ──────────────
-print("\n[0/7] Czyszczenie tabel...")
+print("\n[0/9] Czyszczenie tabel...")
 with engine.begin() as conn:
     conn.execute(text("DELETE FROM mined.variables"))
     conn.execute(text('DELETE FROM mined."Build_perm"'))
     conn.execute(text("DELETE FROM mined.adresses"))
     conn.execute(text("DELETE FROM mined.penalties"))
     conn.execute(text("DELETE FROM mined.buildings"))
+    conn.execute(text("DELETE FROM mined.app_prices"))
     conn.execute(text("DELETE FROM meta.var_description"))
     conn.execute(text("DELETE FROM regeneration.actions"))
     conn.execute(text("DELETE FROM core.urban_blocks_geom"))
     conn.execute(text("DELETE FROM core.urban_blocks"))
+    # Audit staging i processed_files — czyścimy żeby ETL mógł ponownie przetworzyć pliki
+    conn.execute(text("DELETE FROM audit.processed_files"))
+    conn.execute(text("DELETE FROM audit.stg_penalties"))
+    conn.execute(text("DELETE FROM audit.stg_addresses"))
+    conn.execute(text("DELETE FROM audit.stg_build_perm"))
+    conn.execute(text("DELETE FROM audit.stg_buildings"))
+    conn.execute(text("DELETE FROM audit.stg_building_vars"))
+    conn.execute(text("DELETE FROM audit.stg_app_prices"))
 print("      → tabele wyczyszczone")
 
 # ─── 1. core.urban_blocks ───────────────────────────────────────
-print("\n[1/7] core.urban_blocks...")
+print("\n[1/9] core.urban_blocks...")
 df_blocks = pd.read_parquet("data/source/urban_blocks/core_urban_blocks.parquet")
 for col in ["treated_all", "treated_d1nq", "treated_1nq"]:
     if col in df_blocks.columns:
@@ -56,7 +67,7 @@ df_blocks.to_sql("urban_blocks", engine, schema="core", if_exists="append", inde
 print(f"      → {len(df_blocks)} wierszy")
 
 # ─── 2. core.urban_blocks_geom ──────────────────────────────────
-print("\n[2/7] core.urban_blocks_geom...")
+print("\n[2/9] core.urban_blocks_geom...")
 gdf_geom = gpd.read_file("data/source/urban_blocks_geom/geo_urban_blocks.shp")
 gdf_geom = gdf_geom.to_crs(2177)
 gdf_geom["geometry"] = gdf_geom["geometry"].apply(
@@ -66,7 +77,7 @@ gdf_geom.to_postgis("urban_blocks_geom", engine, schema="core", if_exists="appen
 print(f"      → {len(gdf_geom)} bloków")
 
 # ─── 3. regeneration.actions ────────────────────────────────────
-print("\n[3/7] regeneration.actions...")
+print("\n[3/9] regeneration.actions...")
 gdf_regen = gpd.read_file("data/source/regeneration_actions/regeneration_actions.shp")
 gdf_regen = gdf_regen.to_crs(2177)
 gdf_regen.columns = gdf_regen.columns.str.lower()
@@ -93,7 +104,7 @@ gdf_regen.to_postgis("actions", engine, schema="regeneration", if_exists="append
 print(f"      → {len(gdf_regen)} wierszy")
 
 # ─── 4. mined.variables ← legacy ────────────────────────────────
-print("\n[4/7] mined.variables ← legacy parquet...")
+print("\n[4/9] mined.variables ← legacy parquet...")
 df_legacy = pd.read_parquet("data/source/legacy_variables/df_legacy_vars.parquet")
 df_legacy = df_legacy[["var_id", "year", "block_id", "value"]].copy()
 df_legacy["year"]     = pd.to_datetime(df_legacy["year"])
@@ -111,7 +122,7 @@ with engine.begin() as conn:
 print(f"      → {len(df_legacy)} wierszy → mined.variables")
 
 # ─── 5. meta.var_description ────────────────────────────────────
-print("\n[5/7] meta.var_description ← parquet...")
+print("\n[5/9] meta.var_description ← parquet...")
 df_meta = pd.read_parquet("data/source/legacy_variables/meta_var.parquet")
 with engine.begin() as conn:
     conn.execute(
@@ -127,7 +138,7 @@ with engine.begin() as conn:
 print(f"      → {len(df_meta)} metadanych")
 
 # ─── 6. mined.variables ← Census 2021 ───────────────────────────
-print("\n[6/7] Census 2021 — populacja per block...")
+print("\n[6/9] Census 2021 — populacja per block...")
 
 CENSUS_GRID_PATH = "data/source/poptot_grid125_census_2021/grid125poptot.geojson"
 
@@ -199,7 +210,7 @@ with engine.begin() as conn:
 print(f"      → {len(population_by_block)} bloków → mined.variables (rok=2021-01-01)")
 
 # ─── 7. meta.var_description ← Census ───────────────────────────
-print("\n[7/7] meta.var_description ← Census 2021...")
+print("\n[7/9] meta.var_description ← Census 2021...")
 with engine.begin() as conn:
     conn.execute(text("""
         INSERT INTO meta.var_description (var_id, unit, origin, description)
@@ -210,6 +221,91 @@ with engine.begin() as conn:
                 description = EXCLUDED.description
     """))
 print("      → socVrPopt_coun_00000000 → meta.var_description")
+
+# ─── 8. mined.app_prices ← dane historyczne (GeoJSON 2015-2025) ──
+print("\n[8/9] mined.app_prices ← historyczne transakcje mieszkaniowe...")
+
+APP_PRICES_PATH = "data/source/app_prices_historic/app_prices_2015_25.geojson"
+
+gdf_app = gpd.read_file(APP_PRICES_PATH, driver="GeoJSON", encoding="utf-8")
+gdf_app["date"] = pd.to_datetime(gdf_app["date"])
+
+# Reprojekcja 4326 → 2177
+ldz_blocks_2177 = gpd.read_postgis(
+    "SELECT block_id, geometry FROM core.urban_blocks_geom",
+    engine, geom_col="geometry",
+)
+gdf_app = gdf_app.to_crs(ldz_blocks_2177.crs)
+
+# Spatial join → block_id
+joined = gpd.sjoin(
+    gdf_app,
+    ldz_blocks_2177[["block_id", "geometry"]],
+    how="left",
+    predicate="within",
+)
+gdf_app = (
+    joined[~joined["block_id"].isna()]
+    .drop(columns=["index_right"])
+    .reset_index(drop=True)
+    .copy()
+)
+gdf_app["block_id"]    = gdf_app["block_id"].astype(int)
+gdf_app["floor_no"]    = pd.to_numeric(gdf_app["floor_no"],    errors="coerce")
+gdf_app["floor_area"]  = pd.to_numeric(gdf_app["floor_area"],  errors="coerce")
+gdf_app["price_gross"] = pd.to_numeric(gdf_app["price_gross"], errors="coerce")
+
+keep_cols = ["gml_id", "res_unit_id", "building_id", "date",
+             "floor_no", "floor_area", "price_gross", "block_id", "geometry"]
+gdf_app = gpd.GeoDataFrame(
+    gdf_app[[c for c in keep_cols if c in gdf_app.columns]],
+    geometry="geometry", crs="EPSG:2177",
+)
+gdf_app.to_postgis(
+    "app_prices", engine, schema="mined", if_exists="append", index=False,
+)
+print(f"      → {len(gdf_app)} transakcji → mined.app_prices")
+
+# ─── 9. mined.variables ← socVrAS00_avrg_00000000 ───────────────
+print("\n[9/9] mined.variables ← średnia cena/m² per block/year...")
+
+with engine.connect() as conn:
+    rows = conn.execute(text("""
+        SELECT
+            block_id,
+            DATE_TRUNC('year', date) AS year,
+            AVG(price_gross / NULLIF(floor_area, 0)) AS avg_price_per_m2
+        FROM mined.app_prices
+        WHERE floor_area > 0
+          AND price_gross > 0
+          AND block_id IS NOT NULL
+        GROUP BY block_id, DATE_TRUNC('year', date)
+    """)).fetchall()
+
+with engine.begin() as conn:
+    conn.execute(
+        text("""
+            INSERT INTO mined.variables (var_id, year, block_id, value)
+            VALUES (:var_id, :year, :block_id, :value)
+            ON CONFLICT (var_id, year, block_id) DO UPDATE SET value = EXCLUDED.value
+        """),
+        [
+            {
+                "var_id":   "socVrAS00_avrg_00000000",
+                "year":     row.year,
+                "block_id": int(row.block_id),
+                "value":    float(row.avg_price_per_m2),
+            }
+            for row in rows
+        ],
+    )
+    conn.execute(text("""
+        INSERT INTO meta.var_description (var_id, unit, origin, description)
+        VALUES ('socVrAS00_avrg_00000000', 'pln', 'RCN',
+                'average price of the appartments in urban block')
+        ON CONFLICT (var_id) DO NOTHING
+    """))
+print(f"      → {len(rows)} wierszy → mined.variables (socVrAS00_avrg_00000000)")
 
 print("\n" + "=" * 60)
 print("Bootstrap: DONE")
