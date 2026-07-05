@@ -143,9 +143,10 @@ CREATE TABLE IF NOT EXISTS osm.raw_poi (
 
 CREATE TABLE IF NOT EXISTS osm.poi (
     osm_id   BIGINT,
-    type     TEXT,
-    year     TIMESTAMP,
-    geometry GEOMETRY(Point, 4326)
+    fclass   TEXT,
+    date     TIMESTAMP,
+    geometry GEOMETRY(Point, 2177),
+    UNIQUE (osm_id, date)
 );
 
 CREATE TABLE IF NOT EXISTS osm.raw_poly (
@@ -158,11 +159,10 @@ CREATE TABLE IF NOT EXISTS osm.raw_poly (
 
 CREATE TABLE IF NOT EXISTS osm.poly (
     osm_id   BIGINT,
-    type     TEXT,
-    year     TIMESTAMP,
-    geometry GEOMETRY(Polygon, 4326),
-    area     DOUBLE PRECISION,
-    centroid GEOMETRY(Point, 4326)
+    fclass   TEXT,
+    date     TIMESTAMP,
+    geometry GEOMETRY(Geometry, 2177),
+    UNIQUE (osm_id, date)
 );
 
 

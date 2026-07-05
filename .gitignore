@@ -30,3 +30,6 @@ postgres_data/
 # OS
 .DS_Store
 Thumbs.db
+
+# OSM downloaded shapefiles (runtime, too large for repo)
+data/source/osm_latest/
