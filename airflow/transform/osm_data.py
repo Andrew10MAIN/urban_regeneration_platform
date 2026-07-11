@@ -14,6 +14,29 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
+
+def to_mined_year(d) -> pd.Timestamp:
+    """
+    Przelicza datę na rok referencyjny dla mined.variables (zawsze YYYY-01-01).
+
+    Reguła:
+      - data = dokładnie YYYY-01-01  →  (YYYY-1)-01-01   (dane z początku roku
+        reprezentują stan końca poprzedniego roku)
+      - data = dowolna inna          →  YYYY-01-01
+
+    Przykłady:
+      2015-12-31  →  2015-01-01
+      2016-01-01  →  2015-01-01
+      2026-07-11  →  2026-01-01
+      2026-12-31  →  2026-01-01
+      2027-01-01  →  2026-01-01
+    """
+    ts = pd.Timestamp(d)
+    if ts.month == 1 and ts.day == 1:
+        return pd.Timestamp(f"{ts.year - 1}-01-01")
+    return pd.Timestamp(f"{ts.year}-01-01")
+
+
 # ── Listy fclass ──────────────────────────────────────────────────────────────
 
 SCB_LIST = [
@@ -140,10 +163,10 @@ def transform_poly(
 def aggregate_poi_to_variables(
     poi_gdf: gpd.GeoDataFrame,
     blocks_gdf: gpd.GeoDataFrame,
-    year: int,
+    run_date: date,
 ) -> pd.DataFrame:
     """Count POI per block dla każdego var_id. Brakujące bloki → 0."""
-    year_ts = pd.Timestamp(f"{year}-01-01")
+    year_ts = to_mined_year(run_date)
     blocks_df = blocks_gdf[["block_id"]].drop_duplicates()
 
     rows = []
@@ -165,10 +188,10 @@ def aggregate_poi_to_variables(
 def aggregate_poly_to_variables(
     poly_gdf: gpd.GeoDataFrame,
     blocks_gdf: gpd.GeoDataFrame,
-    year: int,
+    run_date: date,
 ) -> pd.DataFrame:
     """SUM(area_poly) / block_area per block dla każdego var_id. Brakujące → 0."""
-    year_ts = pd.Timestamp(f"{year}-01-01")
+    year_ts = to_mined_year(run_date)
 
     poly = poly_gdf.copy()
     poly["area"] = poly.geometry.area  # m² — EPSG:2177

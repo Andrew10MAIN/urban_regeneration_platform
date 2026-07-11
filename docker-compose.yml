@@ -8,6 +8,14 @@ x-airflow-env: &airflow-env
   AIRFLOW_CONN_URBAN_DB: postgresql+psycopg2://urban_user:urban_password@postgis:5432/urban_db
   DATABASE_URL: postgresql+psycopg2://urban_user:urban_password@postgis:5432/urban_db
 
+x-airflow-volumes: &airflow-volumes
+  - ./airflow/dags:/opt/airflow/dags
+  - ./logs/airflow:/opt/airflow/logs
+  - ./docker/airflow/plugins:/opt/airflow/plugins
+  - .:/opt/airflow/urban_platform
+  - ./requirements-airflow.txt:/requirements-airflow.txt
+  - airflow_packages:/home/airflow/.local
+
 services:
 
   # ─────────────────────────────────────────
@@ -39,12 +47,7 @@ services:
     container_name: urban_platform_airflow_init
     environment:
       <<: *airflow-env
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./logs/airflow:/opt/airflow/logs
-      - ./docker/airflow/plugins:/opt/airflow/plugins
-      - .:/opt/airflow/urban_platform
-      - ./requirements-airflow.txt:/requirements-airflow.txt
+    volumes: *airflow-volumes
     depends_on:
       postgis:
         condition: service_healthy
@@ -63,12 +66,7 @@ services:
     container_name: urban_platform_airflow_scheduler
     environment:
       <<: *airflow-env
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./logs/airflow:/opt/airflow/logs
-      - ./docker/airflow/plugins:/opt/airflow/plugins
-      - .:/opt/airflow/urban_platform
-      - ./requirements-airflow.txt:/requirements-airflow.txt
+    volumes: *airflow-volumes
     depends_on:
       postgis:
         condition: service_healthy
@@ -78,7 +76,6 @@ services:
       - bash
       - -c
       - |
-        pip install -r /requirements-airflow.txt --quiet
         airflow scheduler
     restart: unless-stopped
     profiles:
@@ -89,12 +86,7 @@ services:
     container_name: urban_platform_airflow_webserver
     environment:
       <<: *airflow-env
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./logs/airflow:/opt/airflow/logs
-      - ./docker/airflow/plugins:/opt/airflow/plugins
-      - .:/opt/airflow/urban_platform
-      - ./requirements-airflow.txt:/requirements-airflow.txt
+    volumes: *airflow-volumes
     ports:
       - "8080:8080"
     depends_on:
@@ -106,7 +98,6 @@ services:
       - bash
       - -c
       - |
-        pip install -r /requirements-airflow.txt --quiet
         airflow webserver
     restart: unless-stopped
     profiles:
@@ -158,3 +149,5 @@ services:
 
 volumes:
   postgres_data:
+  airflow_packages:
+  pip_cache:

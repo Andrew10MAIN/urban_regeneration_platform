@@ -5,16 +5,16 @@
 CREATE TABLE IF NOT EXISTS core.urban_blocks (
     block_id     BIGINT,
     year         TIMESTAMP,
-    treated_all  BOOLEAN,
-    treated_d1nq BOOLEAN,
-    treated_1nq  BOOLEAN,
+    treated_all  INTEGER,
+    treated_d1nq INTEGER,
+    treated_1nq  INTEGER,
     PRIMARY KEY (block_id, year)
 );
 
 CREATE TABLE IF NOT EXISTS core.urban_blocks_geom (
     block_id BIGINT PRIMARY KEY,
     area     DOUBLE PRECISION,
-    centroid GEOMETRY(Point, 2177),
+
     geometry GEOMETRY(MultiPolygon, 2177)
 );
 
@@ -113,33 +113,55 @@ CREATE TABLE IF NOT EXISTS mined.app_prices (
 
 CREATE TABLE IF NOT EXISTS results.uplifts (
     block_id BIGINT,
-    var_id   TEXT,
+    target_id   TEXT,
+    model_id TEXT,
     uplift   DOUBLE PRECISION,
-    PRIMARY KEY (var_id, block_id)
+    PRIMARY KEY (target_id, block_id, model_id)
 );
 
 CREATE TABLE IF NOT EXISTS results.optimization (
-    block_id          BIGINT PRIMARY KEY,
-    designated_to_reg BOOLEAN
+    block_id          BIGINT,
+    optimization_id   BIGINT,
+    designated_to_reg BOOLEAN,
+    PRIMARY KEY (block_id, optimization_id)
 );
 
 CREATE TABLE IF NOT EXISTS results.predicted_reg_price (
-    block_id   BIGINT PRIMARY KEY,
-    pred_price DOUBLE PRECISION
+    block_id   BIGINT,
+    model_id TEXT,    
+    pred_price DOUBLE PRECISION,
+    PRIMARY KEY (block_id, model_id)
+);
+
+CREATE TABLE IF NOT EXISTS results.feature_spec (
+    features_id   TEXT,
+    features_no INTEGER,
+    feature_id TEXT,
+    PRIMARY KEY (features_id, features_no)
+);
+
+CREATE TABLE IF NOT EXISTS results.hypp_spec (
+    hyppar_id   TEXT,
+    model_id TEXT,    
+    hyppar TEXT,
+    value DOUBLE PRECISION,
+    PRIMARY KEY (hyppar_id, model_id)
 );
 
 
+CREATE TABLE IF NOT EXISTS results.model_setups (
+    model_id TEXT,  
+    model_type TEXT,    
+    target_id TEXT,
+    hyppar_id   TEXT,
+    features_id   TEXT,
+    PRIMARY KEY (hyppar_id, model_type)
+);
 -- =========================
 -- OSM
 -- =========================
 
-CREATE TABLE IF NOT EXISTS osm.raw_poi (
-    osm_id      BIGINT,
-    type        TEXT,
-    valid_from  TIMESTAMP,
-    valid_until TIMESTAMP,
-    geometry    GEOMETRY(Point, 4326)
-);
+
 
 CREATE TABLE IF NOT EXISTS osm.poi (
     osm_id   BIGINT,
@@ -149,13 +171,7 @@ CREATE TABLE IF NOT EXISTS osm.poi (
     UNIQUE (osm_id, date)
 );
 
-CREATE TABLE IF NOT EXISTS osm.raw_poly (
-    osm_id      BIGINT,
-    type        TEXT,
-    valid_from  TIMESTAMP,
-    valid_until TIMESTAMP,
-    geometry    GEOMETRY(Polygon, 4326)
-);
+
 
 CREATE TABLE IF NOT EXISTS osm.poly (
     osm_id   BIGINT,

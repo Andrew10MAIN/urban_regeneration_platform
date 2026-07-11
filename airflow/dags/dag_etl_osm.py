@@ -170,7 +170,6 @@ def etl_osm():
         import pandas as pd
 
         engine = get_engine()
-        current_year = date.today().year
 
         poi_gdf = gpd.read_postgis(
             f"SELECT osm_id, fclass, date, block_id, geometry "
@@ -187,8 +186,9 @@ def etl_osm():
             engine, geom_col="geometry",
         )
 
-        df_poi  = aggregate_poi_to_variables(poi_gdf, blocks_gdf, current_year)
-        df_poly = aggregate_poly_to_variables(poly_gdf, blocks_gdf, current_year)
+        run_date = date.today()
+        df_poi  = aggregate_poi_to_variables(poi_gdf, blocks_gdf, run_date)
+        df_poly = aggregate_poly_to_variables(poly_gdf, blocks_gdf, run_date)
         all_vars = pd.concat([df_poi, df_poly], ignore_index=True)
 
         return upsert_osm_variables(all_vars, engine)

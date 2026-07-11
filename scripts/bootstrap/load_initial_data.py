@@ -29,7 +29,7 @@ import pandas as pd
 import geopandas as gpd
 import osmnx as ox
 from shapely.ops import transform
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, Boolean
 from geoalchemy2 import Geometry
 
 DATABASE_URL = "postgresql+psycopg2://urban_user:urban_password@localhost:5433/urban_db"
@@ -67,9 +67,6 @@ print("      → tabele wyczyszczone")
 # ─── 1. core.urban_blocks ────────────────────────────────────────
 print("\n[1/13] core.urban_blocks...")
 df_blocks = pd.read_parquet("data/source/urban_blocks/core_urban_blocks.parquet")
-for col in ["treated_all", "treated_d1nq", "treated_1nq"]:
-    if col in df_blocks.columns:
-        df_blocks[col] = df_blocks[col].astype(bool)
 df_blocks.to_sql("urban_blocks", engine, schema="core", if_exists="append", index=False)
 print(f"      → {len(df_blocks)} wierszy")
 
@@ -395,6 +392,10 @@ for var_id, fclasses in DICT_OSM_POI.items():
 
 osm_poi_vars = pd.concat(poi_vars_list, ignore_index=True)
 osm_poi_vars["block_id"] = osm_poi_vars["block_id"].astype(int)
+# osm.poi przechowuje YYYY-12-31; mined.variables zawsze YYYY-01-01
+osm_poi_vars["year"] = osm_poi_vars["year"].apply(
+    lambda d: pd.Timestamp(f"{d.year}-01-01")
+)
 
 with engine.begin() as conn:
     conn.execute(
@@ -436,6 +437,10 @@ for var_id, fclasses in DICT_OSM_POLY.items():
 
 osm_poly_vars = pd.concat(poly_vars_list, ignore_index=True)
 osm_poly_vars["block_id"] = osm_poly_vars["block_id"].astype(int)
+# osm.poly przechowuje YYYY-12-31; mined.variables zawsze YYYY-01-01
+osm_poly_vars["year"] = osm_poly_vars["year"].apply(
+    lambda d: pd.Timestamp(f"{d.year}-01-01")
+)
 
 with engine.begin() as conn:
     conn.execute(
