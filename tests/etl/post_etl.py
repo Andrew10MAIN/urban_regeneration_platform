@@ -268,10 +268,30 @@ EXPECTED_DTYPES: dict[str, dict] = {
         "date":    np.dtype("<M8[ns]"),
         "geometry":GeometryDtype(),
     },
+    # ML pipeline results (005_ml_tables.sql)
+    "results.models": {
+        "model_id":    np.dtype("O"),
+        "model_type":  np.dtype("O"),
+        "random_seed": np.dtype("int64"),
+        "target_id":   np.dtype("O"),
+        "pre_period":  np.dtype("int64"),
+        "post_period": np.dtype("int64"),
+        "run_at":      np.dtype("O"),   # timestamptz → object in pandas
+    },
+    "results.hyperparameters": {
+        "model_id":        np.dtype("O"),
+        "hyper_parameter": np.dtype("O"),
+        "value":           np.dtype("O"),
+    },
+    "results.features": {
+        "model_id":   np.dtype("O"),
+        "feature_no": np.dtype("int64"),
+        "var_id":     np.dtype("O"),
+    },
     "results.uplifts": {
         "block_id":  np.dtype("int64"),
-        "target_id": np.dtype("O"),
         "model_id":  np.dtype("O"),
+        "treatment": np.dtype("O"),
         "uplift":    np.dtype("float64"),
     },
     "results.optimization": {
@@ -283,24 +303,6 @@ EXPECTED_DTYPES: dict[str, dict] = {
         "block_id":   np.dtype("int64"),
         "model_id":   np.dtype("O"),
         "pred_price": np.dtype("float64"),
-    },
-    "results.feature_spec": {
-        "features_id": np.dtype("O"),
-        "features_no": np.dtype("int64"),
-        "feature_id":  np.dtype("O"),
-    },
-    "results.hypp_spec": {
-        "hyppar_id": np.dtype("O"),
-        "model_id":  np.dtype("O"),
-        "hyppar":    np.dtype("O"),
-        "value":     np.dtype("float64"),
-    },
-    "results.model_setups": {
-        "model_id":    np.dtype("O"),
-        "model_type":  np.dtype("O"),
-        "target_id":   np.dtype("O"),
-        "hyppar_id":   np.dtype("O"),
-        "features_id": np.dtype("O"),
     },
 }
 
@@ -319,6 +321,10 @@ GEO_TABLES = {
 
 # Tables loaded as plain pandas (no geometry)
 PLAIN_TABLES = set(EXPECTED_DTYPES.keys()) - GEO_TABLES
+
+# Note: results.model_setups / results.hypp_spec / results.feature_spec
+# were replaced by results.models / results.hyperparameters / results.features
+# in 005_ml_tables.sql
 
 # ── Per-variable test configuration ───────────────────────────────────────────
 # Flags: [check_all_blocks, check_non_zero_blocks, check_date_format,

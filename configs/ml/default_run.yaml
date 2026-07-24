@@ -1,0 +1,40 @@
+# =============================================================================
+# Urban Regeneration Platform — ML Pipeline Configuration
+# Mirrors the "Input" section of experiments/notebooks/ml_experimenting.ipynb
+# =============================================================================
+
+# --- Model identity ----------------------------------------------------------
+model_id: "CF00000000003"
+model_type: "Causal Forest with spatial spillovers of treatment"
+
+# --- Target variable ---------------------------------------------------------
+# var_id from mined.variables; pipeline computes (post - pre) difference as Y
+target_variable: "socVrEduc_avrg_00000000"
+
+# --- Time periods -------------------------------------------------------------
+pre_period: 2019          # baseline year (confounders + treatment reference)
+post_period: 2025         # outcome year
+pre_period_deviation: 2   # ±N years tolerance when pre_period data is missing
+
+# --- Confounders (X) ---------------------------------------------------------
+confounders:
+
+  - "urVibSCBx_coun_00000000"
+  - "socVrPopt_coun_00000000"
+  - "bdEnvFRab_arrt_00000000"
+  - "bdEnvFRxx_arrt_00000000"
+  - "urVibEnAl_coun_00000000"
+
+# --- CausalForestDML hyperparameters -----------------------------------------
+# Applied to: inner RandomForestRegressor models AND the outer CausalForest
+hyperparameters:
+  n_estimators: 100
+  max_depth: 3
+  min_samples_leaf: 20
+  n_jobs: 1
+  criterion: "mse"
+  min_impurity_decrease: 0.001
+  random_state: 123
+
+# --- Global random seed -------------------------------------------------------
+random_seed: 42

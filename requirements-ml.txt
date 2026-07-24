@@ -1,0 +1,14 @@
+# ML container requirements (superset of requirements.txt)
+-r requirements.txt
+
+# Causal inference
+econml>=0.14,<1.0
+
+# Experiment tracking
+mlflow>=2.17,<3.0
+
+# Config
+pyyaml>=6.0
+
+# Model serialization
+joblib>=1.3

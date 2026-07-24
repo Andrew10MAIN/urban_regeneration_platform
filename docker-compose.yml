@@ -129,7 +129,31 @@ services:
       - app
 
   # ─────────────────────────────────────────
+  # MLFLOW — profile: ml
+  # Experiment tracking server (UI: http://localhost:5000)
+  # ─────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.19.0
+    container_name: urban_platform_mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+    restart: unless-stopped
+    profiles:
+      - ml
+
+  # ─────────────────────────────────────────
   # ML PIPELINE — profile: ml
+  # One-shot container; run via:
+  #   docker compose --profile ml run --rm ml
+  #   docker compose --profile ml run --rm ml python src/ml/run_pipeline.py --config configs/ml/my_run.yaml
   # ─────────────────────────────────────────
   ml:
     build:
@@ -138,12 +162,15 @@ services:
     container_name: urban_platform_ml
     environment:
       DATABASE_URL: postgresql+psycopg2://urban_user:urban_password@postgis:5432/urban_db
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
       - .:/app
     depends_on:
       postgis:
         condition: service_healthy
-    command: ["python", "src/ml/run_pipeline.py"]
+      mlflow:
+        condition: service_started
+    command: ["python", "src/ml/run_pipeline.py", "--config", "configs/ml/default_run.yaml"]
     profiles:
       - ml
 
@@ -151,3 +178,4 @@ volumes:
   postgres_data:
   airflow_packages:
   pip_cache:
+  mlflow_data:

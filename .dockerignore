@@ -1,0 +1,9 @@
+logs/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+data/source/osm_latest/
+experiments/
