@@ -27,7 +27,8 @@ class DataBundle:
     X: np.ndarray             # (N, k) – confounders at pre_period
     T: np.ndarray             # (N, 2) – treatment indicators [d1nq, 1nq]
     uplift_base: pd.DataFrame # block_id + treatment columns, sorted by block_id
-    actual_confounders: list[str]   # confounders that had data (some may be skipped)
+    actual_confounders: list[str]        # confounders that had data (some may be skipped)
+    confounder_years: dict[str, int]     # {var_id: year actually used}
     n_blocks: int
 
 
@@ -77,25 +78,28 @@ def load_data(config: ModelConfig, engine: Engine) -> DataBundle:
     # ── X: confounders at pre_period (with ±deviation fallback) ──────────────
     confounder_dfs: list[pd.DataFrame] = []
     actual_confounders: list[str] = []
+    confounder_years: dict[str, int] = {}
 
     for var in config.confounders:
         df_c = mined_variables[
             (mined_variables["var_id"] == var) &
             (mined_variables["year"] == pre_ts)
         ][["block_id", "value"]].rename(columns={"value": var}).copy()
+        year_used = config.pre_period
 
         if df_c.empty and config.pre_period_deviation > 0:
             found = False
             for d in range(1, config.pre_period_deviation + 1):
-                for year in [config.pre_period - d, config.pre_period + d]:
+                for fallback_year in [config.pre_period - d, config.pre_period + d]:
                     df_c = mined_variables[
                         (mined_variables["var_id"] == var) &
-                        (mined_variables["year"] == pd.Timestamp(f"{year}-01-01"))
+                        (mined_variables["year"] == pd.Timestamp(f"{fallback_year}-01-01"))
                     ][["block_id", "value"]].rename(columns={"value": var}).copy()
                     if not df_c.empty:
+                        year_used = fallback_year
                         log.info(
                             "Confounder %s: used data from year %d (pre_period fallback)",
-                            var, year,
+                            var, fallback_year,
                         )
                         found = True
                         break
@@ -111,6 +115,7 @@ def load_data(config: ModelConfig, engine: Engine) -> DataBundle:
 
         confounder_dfs.append(df_c)
         actual_confounders.append(var)
+        confounder_years[var] = year_used
 
     if confounder_dfs:
         merged_confounders_pre = reduce(
@@ -170,5 +175,6 @@ def load_data(config: ModelConfig, engine: Engine) -> DataBundle:
         T=T,
         uplift_base=uplift_base,
         actual_confounders=actual_confounders,
+        confounder_years=confounder_years,
         n_blocks=len(uplift_base),
     )

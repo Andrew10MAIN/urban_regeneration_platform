@@ -158,7 +158,12 @@ def train(
     # ── features_df (→ results.features) ─────────────────────────────────────
     sorted_confounders = sorted(data.actual_confounders)
     features_df = pd.DataFrame([
-        {"model_id": config.model_id, "feature_no": i, "var_id": var}
+        {
+            "model_id":   config.model_id,
+            "feature_no": i,
+            "var_id":     var,
+            "year":       data.confounder_years[var],
+        }
         for i, var in enumerate(sorted_confounders)
     ])
 

@@ -1,11 +1,12 @@
 """
-Persist ML results to the results.* tables in urban_db.
+Persist RF results to the results.* tables in urban_db.
 
 Tables written:
-  results.models           — df_model     (ON CONFLICT DO UPDATE)
-  results.hyperparameters  — hyper_df     (ON CONFLICT DO UPDATE)
-  results.features         — features_df  (ON CONFLICT DO UPDATE)
-  results.uplifts          — uplift_long  (ON CONFLICT DO UPDATE)
+  results.models               — df_model          (ON CONFLICT DO UPDATE)
+  results.hyperparameters      — hyper_df           (ON CONFLICT DO UPDATE)
+  results.features             — features_df        (ON CONFLICT DO UPDATE)
+  results.shap_rf_reg_price    — shap_long_df       (ON CONFLICT DO UPDATE)
+  results.predicted_reg_prices — predicted_prices   (ON CONFLICT DO UPDATE)
 """
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ from sqlalchemy import text
 
 log = logging.getLogger(__name__)
 
-# ── Upsert helpers ─────────────────────────────────────────────────────────────
+BATCH_SIZE = 500
+
 
 def _upsert_models(df: pd.DataFrame, engine: Engine) -> int:
     rows = df.to_dict(orient="records")
@@ -69,40 +71,49 @@ def _upsert_features(df: pd.DataFrame, engine: Engine) -> int:
     return len(rows)
 
 
-def _upsert_uplifts(df: pd.DataFrame, engine: Engine) -> int:
+def _upsert_shap(df: pd.DataFrame, engine: Engine) -> int:
     rows = df.to_dict(orient="records")
     sql = text("""
-        INSERT INTO results.uplifts (block_id, model_id, treatment, uplift)
-        VALUES (:block_id, :model_id, :treatment, :uplift)
-        ON CONFLICT (block_id, model_id, treatment) DO UPDATE SET
-            uplift = EXCLUDED.uplift
+        INSERT INTO results.shap_rf_reg_price (model_id, block_id, var_id, value)
+        VALUES (:model_id, :block_id, :var_id, :value)
+        ON CONFLICT (model_id, block_id, var_id) DO UPDATE SET
+            value = EXCLUDED.value
     """)
-    # batch inserts for large tables
-    batch_size = 500
     total = 0
     with engine.begin() as conn:
-        for i in range(0, len(rows), batch_size):
-            conn.execute(sql, rows[i : i + batch_size])
-            total += len(rows[i : i + batch_size])
-    log.info("results.uplifts: upserted %d row(s)", total)
+        for i in range(0, len(rows), BATCH_SIZE):
+            conn.execute(sql, rows[i : i + BATCH_SIZE])
+            total += len(rows[i : i + BATCH_SIZE])
+    log.info("results.shap_rf_reg_price: upserted %d row(s)", total)
     return total
 
 
-# ── Public entry ───────────────────────────────────────────────────────────────
+def _upsert_predicted_prices(df: pd.DataFrame, engine: Engine) -> int:
+    rows = df.to_dict(orient="records")
+    sql = text("""
+        INSERT INTO results.predicted_reg_prices (model_id, block_id, costs)
+        VALUES (:model_id, :block_id, :costs)
+        ON CONFLICT (model_id, block_id) DO UPDATE SET
+            costs = EXCLUDED.costs
+    """)
+    total = 0
+    with engine.begin() as conn:
+        for i in range(0, len(rows), BATCH_SIZE):
+            conn.execute(sql, rows[i : i + BATCH_SIZE])
+            total += len(rows[i : i + BATCH_SIZE])
+    log.info("results.predicted_reg_prices: upserted %d row(s)", total)
+    return total
+
 
 def save_results(result, engine: Engine) -> dict[str, int]:
-    """
-    Persist all result dataframes to the database.
-    Returns dict of row counts per table.
-    """
-    log.info("Saving ML results to database...")
-
+    """Persist all RF result dataframes to the database."""
+    log.info("Saving RF results to database...")
     counts = {
-        "results.models":          _upsert_models(result.df_model, engine),
-        "results.hyperparameters": _upsert_hyperparameters(result.hyper_df, engine),
-        "results.features":        _upsert_features(result.features_df, engine),
-        "results.uplifts":         _upsert_uplifts(result.uplift_long, engine),
+        "results.models":               _upsert_models(result.df_model, engine),
+        "results.hyperparameters":      _upsert_hyperparameters(result.hyper_df, engine),
+        "results.features":             _upsert_features(result.features_df, engine),
+        "results.shap_rf_reg_price":    _upsert_shap(result.shap_long_df, engine),
+        "results.predicted_reg_prices": _upsert_predicted_prices(result.predicted_prices, engine),
     }
-
     log.info("DB write complete: %s", counts)
     return counts

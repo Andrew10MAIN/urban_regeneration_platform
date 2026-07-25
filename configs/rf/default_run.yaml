@@ -1,0 +1,31 @@
+# =============================================================================
+# RF Regeneration Cost Model — default configuration
+# Run with:
+#   docker compose --profile ml run --rm rf
+#   docker compose --profile ml run --rm rf python src/rf/run_pipeline.py --config configs/rf/my_run.yaml
+# =============================================================================
+
+model_id: "RF00000000001"
+model_type: "Random Forest Regeneration Cost"
+random_seed: 42
+
+pre_period: 2019
+post_period: 2025
+
+hyperparameters:
+  n_est: 100
+  n_jobs: 1
+  random_state: 123
+
+# Variables excluded from features (at pre_period) — typically unavailable or unreliable
+excluded_vars:
+  - socVrAgex_avrg_00000000
+  - socVrEduc_avrg_00000000
+  - socVrUnmp_avrg_00000000
+  - socVrWage_avrg_00000000
+  - socVrAS00_avrg_00000000
+
+# Variables loaded from a year different than pre_period
+# Format: var_id: year
+special_year_vars:
+  socVrPopt_coun_00000000: 2021

@@ -150,7 +150,7 @@ services:
       - ml
 
   # ─────────────────────────────────────────
-  # ML PIPELINE — profile: ml
+  # ML PIPELINE (CausalForest) — profile: ml
   # One-shot container; run via:
   #   docker compose --profile ml run --rm ml
   #   docker compose --profile ml run --rm ml python src/ml/run_pipeline.py --config configs/ml/my_run.yaml
@@ -171,6 +171,31 @@ services:
       mlflow:
         condition: service_started
     command: ["python", "src/ml/run_pipeline.py", "--config", "configs/ml/default_run.yaml"]
+    profiles:
+      - ml
+
+  # ─────────────────────────────────────────
+  # RF PIPELINE (Cost Model) — profile: ml
+  # One-shot container; run via:
+  #   docker compose --profile ml run --rm rf
+  #   docker compose --profile ml run --rm rf python src/rf/run_pipeline.py --config configs/rf/my_run.yaml
+  # ─────────────────────────────────────────
+  rf:
+    build:
+      context: .
+      dockerfile: docker/python/Dockerfile
+    container_name: urban_platform_rf
+    environment:
+      DATABASE_URL: postgresql+psycopg2://urban_user:urban_password@postgis:5432/urban_db
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - .:/app
+    depends_on:
+      postgis:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    command: ["python", "src/rf/run_pipeline.py", "--config", "configs/rf/default_run.yaml"]
     profiles:
       - ml
 

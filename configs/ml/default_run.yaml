@@ -23,7 +23,6 @@ confounders:
   - "socVrPopt_coun_00000000"
   - "bdEnvFRab_arrt_00000000"
   - "bdEnvFRxx_arrt_00000000"
-  - "urVibEnAl_coun_00000000"
 
 # --- CausalForestDML hyperparameters -----------------------------------------
 # Applied to: inner RandomForestRegressor models AND the outer CausalForest

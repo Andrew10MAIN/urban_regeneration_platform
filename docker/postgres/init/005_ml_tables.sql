@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS results.features (
     model_id   TEXT    NOT NULL REFERENCES results.models(model_id) ON DELETE CASCADE,
     feature_no INTEGER NOT NULL,
     var_id     TEXT    NOT NULL,
+    year       INTEGER,
     PRIMARY KEY (model_id, feature_no)
 );
 
