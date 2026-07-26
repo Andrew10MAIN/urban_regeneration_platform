@@ -1,31 +1,15 @@
 # =============================================================================
-# Urban Regeneration Platform — ML Pipeline Configuration
-# Mirrors the "Input" section of experiments/notebooks/ml_experimenting.ipynb
+# Urban Regeneration Platform — ML + Optimization Pipeline Configuration
+# Run: docker compose --profile ml run --rm ml
 # =============================================================================
 
-# --- Model identity ----------------------------------------------------------
-model_id: "CF00000000003"
+# --- Common model settings (shared across all CF models) ---------------------
 model_type: "Causal Forest with spatial spillovers of treatment"
+pre_period: 2019
+post_period: 2025
+pre_period_deviation: 2
+random_seed: 42
 
-# --- Target variable ---------------------------------------------------------
-# var_id from mined.variables; pipeline computes (post - pre) difference as Y
-target_variable: "socVrEduc_avrg_00000000"
-
-# --- Time periods -------------------------------------------------------------
-pre_period: 2019          # baseline year (confounders + treatment reference)
-post_period: 2025         # outcome year
-pre_period_deviation: 2   # ±N years tolerance when pre_period data is missing
-
-# --- Confounders (X) ---------------------------------------------------------
-confounders:
-
-  - "urVibSCBx_coun_00000000"
-  - "socVrPopt_coun_00000000"
-  - "bdEnvFRab_arrt_00000000"
-  - "bdEnvFRxx_arrt_00000000"
-
-# --- CausalForestDML hyperparameters -----------------------------------------
-# Applied to: inner RandomForestRegressor models AND the outer CausalForest
 hyperparameters:
   n_estimators: 100
   max_depth: 3
@@ -35,5 +19,45 @@ hyperparameters:
   min_impurity_decrease: 0.001
   random_state: 123
 
-# --- Global random seed -------------------------------------------------------
-random_seed: 42
+# --- Per-model definitions ---------------------------------------------------
+models:
+
+  - model_id: "CF00000000001"
+    target_variable: "urVibBlPr_coun_00000000"
+    confounders:
+      - "urVibSCBx_coun_00000000"
+      - "socVrPopt_coun_00000000"
+      - "bdEnvFRab_arrt_00000000"
+      - "bdEnvFRxx_arrt_00000000"
+
+  - model_id: "CF00000000002"
+    target_variable: "urVibSCBx_coun_00000000"
+    confounders:
+      - "socVrPopt_coun_00000000"
+      - "bdEnvFRab_arrt_00000000"
+      - "bdEnvFRxx_arrt_00000000"
+
+  - model_id: "CF00000000003"
+    target_variable: "socVrEduc_avrg_00000000"
+    confounders:
+      - "urVibSCBx_coun_00000000"
+      - "socVrPopt_coun_00000000"
+      - "bdEnvFRab_arrt_00000000"
+      - "bdEnvFRxx_arrt_00000000"
+
+# --- Optimization (ILP — PuLP CBC) -------------------------------------------
+optimization:
+  opt_id: "OP00000000001"
+  rf_model_id: "RF00000000001"   # which RF cost model to use for block costs
+  cost_limit: 400_000_000        # total budget (PLN)
+  spill_on_treated: true         # allow spillover on directly-treated blocks
+  n_clusters: 1                  # number of connected components in solution
+  time_limit: 300                # CBC solver time limit (seconds)
+  normalize: true                # normalize uplift columns before optimization
+
+  # Per-model weights applied to uplift scores in the objective function.
+  # Missing model_ids default to 1.0. Weights are saved to results.optimization_weights_setup.
+  model_weights:
+    CF00000000001: 0.40
+    CF00000000002: 0.35
+    CF00000000003: 0.25
