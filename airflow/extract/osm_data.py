@@ -53,7 +53,7 @@ def download_geofabrik(out_dir: Path = OSM_OUT_DIR) -> Path:
         MAX_SEG_RETRIES = 10
 
         # Pobierz total size
-        head = requests.head(GEOFABRIK_URL, timeout=30, allow_redirects=True)
+        head = requests.head(GEOFABRIK_URL, timeout=120, allow_redirects=True)
         head.raise_for_status()
         total = int(head.headers["content-length"])
         log.info("Rozmiar pliku: %.1f MB", total / 1e6)
