@@ -32,7 +32,11 @@ from shapely.ops import transform
 from sqlalchemy import create_engine, text, Boolean
 from geoalchemy2 import Geometry
 
-DATABASE_URL = "postgresql+psycopg2://urban_user:urban_password@localhost:5433/urban_db"
+import os
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql+psycopg2://urban_user:urban_password@localhost:5433/urban_db"
+)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 print("=" * 60)

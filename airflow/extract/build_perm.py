@@ -34,6 +34,8 @@ def get_bbox(engine: Engine) -> tuple:
         engine,
         geom_col="geometry"
     )
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326")
     gdf_2180 = gdf.to_crs("EPSG:2180")
     minx, miny, maxx, maxy = gdf_2180.total_bounds
     log.info("BBox (EPSG:2180): %.2f %.2f %.2f %.2f", minx, miny, maxx, maxy)
