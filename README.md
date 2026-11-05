@@ -101,6 +101,8 @@ The bootstrap script (`scripts/bootstrap/load_initial_data.py`) loads the founda
 | Historical OSM data | Pre-processed OSM snapshots aggregated to blocks | Reproducible historical baseline independent of live OSM state |
 | Census 2021 | GUS 100×100 m grid aggregated to urban blocks | Official population statistics reference |
 | Apartment transaction prices | Łódź city spatial data portal (historical extract) | Historical series not exposed by the live WFS endpoint |
+| Building plot transaction prices | Register of Real Estate Prices (RCN) | No live endpoint; block-level series requires neighbour imputation |
+| Public transport stops | Pre-processed OSM snapshots, 2015–2025 | Reproducible historical baseline independent of live OSM state |
 | Administrative penalties | Municipal Guard of Łódź, public information request | Not available through any programmatic endpoint |
 
 ## 7. Database Overview
@@ -149,15 +151,17 @@ All views support export: interactive maps as HTML, charts as PNG.
 
 ## 10. Data Provenance & Privacy
 
-Three of the committed source datasets warrant explicit provenance notes.
+Four of the committed source datasets warrant explicit provenance notes.
 
 **Sensitive urban survey data** (`data/source/legacy_variables/df_legacy_vars.parquet`) — socio-economic indicators (average age, educational attainment, unemployment level, wage quantile of inhabitants aged 25+) derived from a field survey. The dataset is committed **already aggregated to urban-block level**: it contains no individual records, no addresses and no personal identifiers, only block–year–variable–value tuples. Aggregation was performed before the data entered this repository and is irreversible. Variable definitions are documented in `meta_var.parquet` and loaded into the `meta` schema.
 
 **Apartment transaction prices** (`data/source/app_prices_historic/`) — the historical extract was downloaded from the Łódź city spatial data portal, <https://nowa.mapa.lodz.pl/dla-profesjonalistow/> (accessed June 2026), and is loaded directly into the database by the bootstrap script rather than through an API. Records describe cadastral premises (premises and building identifiers, transaction date, floor, floor area, gross price); they contain no personal identifiers and are not linked to any natural person. The `etl_app_prices` DAG subsequently extends this extract with newer transactions from the WFS RCN endpoint.
 
+**Building plot transaction prices** (`data/source/build_plots_prices/`) — sourced from the Register of Real Estate Prices (*Rejestr Cen Nieruchomości*, RCN). Records describe cadastral plots (plot identifier, land-use category, gross transaction price, document and record dates) with plot geometry; they contain no personal identifiers and are not linked to any natural person. Block-level values are computed as the mean gross price per m² of plot area, and blocks without a transaction in a given year receive the mean of their neighbouring blocks (iterated until the whole area is covered), so the resulting variable is partly imputed by construction.
+
 **Administrative penalties** (`data/source/offenses_penalties/`) — obtained from the Municipal Guard of Łódź (Straż Miejska w Łodzi) in response to a written public information request submitted on 23 January 2024 (*wniosek o udostępnienie informacji publicznej*). The data were supplied by the Municipal Guard in anonymised form: each record contains only the location, date and legal classification of the offence, with no personal identifiers.
 
-All three datasets enter the pipeline solely as inputs for aggregation to urban-block level; all modelling, causal estimation and optimisation are performed on block-level aggregates. Point-level layers appear in the dashboard only as optional EDA overlays.
+All four datasets enter the pipeline solely as inputs for aggregation to urban-block level; all modelling, causal estimation and optimisation are performed on block-level aggregates. Point-level layers appear in the dashboard only as optional EDA overlays.
 
 **Other sources** — OpenStreetMap extracts are used under the Open Database Licence (ODbL); Census 2021 grids are published by Statistics Poland (GUS); building permits and building footprints originate from the GUNB and EGiB WFS services respectively.
 

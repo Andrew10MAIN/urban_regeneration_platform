@@ -22,6 +22,9 @@ Czyści dane i ładuje od nowa.
   11. mined.variables       ← zmienne OSM poi (count per block/year)
   12. mined.variables       ← zmienne OSM poly (area ratio per block/year)
   13. meta.var_description  ← metadane OSM
+  14. mined.variables       ← urVibTran_coun_00000000 (przystanki OSM)
+  15. mined.variables       ← socVrBS00_avrg_00000000 (ceny działek budowlanych)
+  16. meta.var_description  ← metadane urVibTran + socVrBS00
 """
 
 import numpy as np
@@ -44,7 +47,7 @@ print("Bootstrap: start")
 print("=" * 60)
 
 # ─── Czyszczenie ─────────────────────────────────────────────────
-print("\n[0/13] Czyszczenie tabel...")
+print("\n[0/16] Czyszczenie tabel...")
 with engine.begin() as conn:
     conn.execute(text("DELETE FROM mined.variables"))
     conn.execute(text('DELETE FROM mined."Build_perm"'))
@@ -69,13 +72,13 @@ with engine.begin() as conn:
 print("      → tabele wyczyszczone")
 
 # ─── 1. core.urban_blocks ────────────────────────────────────────
-print("\n[1/13] core.urban_blocks...")
+print("\n[1/16] core.urban_blocks...")
 df_blocks = pd.read_parquet("data/source/urban_blocks/core_urban_blocks.parquet")
 df_blocks.to_sql("urban_blocks", engine, schema="core", if_exists="append", index=False)
 print(f"      → {len(df_blocks)} wierszy")
 
 # ─── 2. core.urban_blocks_geom ───────────────────────────────────
-print("\n[2/13] core.urban_blocks_geom...")
+print("\n[2/16] core.urban_blocks_geom...")
 gdf_geom = gpd.read_file("data/source/urban_blocks_geom/geo_urban_blocks.shp")
 gdf_geom = gdf_geom.to_crs(2177)
 gdf_geom["geometry"] = gdf_geom["geometry"].apply(
@@ -85,7 +88,7 @@ gdf_geom.to_postgis("urban_blocks_geom", engine, schema="core", if_exists="appen
 print(f"      → {len(gdf_geom)} bloków")
 
 # ─── 3. regeneration.actions ─────────────────────────────────────
-print("\n[3/13] regeneration.actions...")
+print("\n[3/16] regeneration.actions...")
 gdf_regen = gpd.read_file("data/source/regeneration_actions/regeneration_actions.shp")
 gdf_regen = gdf_regen.to_crs(2177)
 gdf_regen.columns = gdf_regen.columns.str.lower()
@@ -112,7 +115,7 @@ gdf_regen.to_postgis("actions", engine, schema="regeneration", if_exists="append
 print(f"      → {len(gdf_regen)} wierszy")
 
 # ─── 4. mined.variables ← legacy ─────────────────────────────────
-print("\n[4/13] mined.variables ← legacy parquet...")
+print("\n[4/16] mined.variables ← legacy parquet...")
 df_legacy = pd.read_parquet("data/source/legacy_variables/df_legacy_vars.parquet")
 df_legacy = df_legacy[["var_id", "year", "block_id", "value"]].copy()
 df_legacy["year"]     = pd.to_datetime(df_legacy["year"])
@@ -130,7 +133,7 @@ with engine.begin() as conn:
 print(f"      → {len(df_legacy)} wierszy → mined.variables")
 
 # ─── 5. meta.var_description ← legacy ───────────────────────────
-print("\n[5/13] meta.var_description ← parquet...")
+print("\n[5/16] meta.var_description ← parquet...")
 df_meta = pd.read_parquet("data/source/legacy_variables/meta_var.parquet")
 with engine.begin() as conn:
     conn.execute(
@@ -146,7 +149,7 @@ with engine.begin() as conn:
 print(f"      → {len(df_meta)} metadanych")
 
 # ─── 6. mined.variables ← Census 2021 ────────────────────────────
-print("\n[6/13] Census 2021 — populacja per block...")
+print("\n[6/16] Census 2021 — populacja per block...")
 
 CENSUS_GRID_PATH = "data/source/poptot_grid125_census_2021/grid125poptot.geojson"
 
@@ -218,7 +221,7 @@ with engine.begin() as conn:
 print(f"      → {len(population_by_block)} bloków → mined.variables (rok=2021-01-01)")
 
 # ─── 7. meta.var_description ← Census ───────────────────────────
-print("\n[7/13] meta.var_description ← Census 2021...")
+print("\n[7/16] meta.var_description ← Census 2021...")
 with engine.begin() as conn:
     conn.execute(text("""
         INSERT INTO meta.var_description (var_id, unit, origin, description)
@@ -231,7 +234,7 @@ with engine.begin() as conn:
 print("      → socVrPopt_coun_00000000 → meta.var_description")
 
 # ─── 8. mined.app_prices ← dane historyczne ──────────────────────
-print("\n[8/13] mined.app_prices ← historyczne transakcje mieszkaniowe...")
+print("\n[8/16] mined.app_prices ← historyczne transakcje mieszkaniowe...")
 
 APP_PRICES_PATH = "data/source/app_prices_historic/app_prices_2015_25.geojson"
 
@@ -271,7 +274,7 @@ gdf_app.to_postgis("app_prices", engine, schema="mined", if_exists="append", ind
 print(f"      → {len(gdf_app)} transakcji → mined.app_prices")
 
 # ─── 9. mined.variables ← ceny mieszkań ─────────────────────────
-print("\n[9/13] mined.variables ← średnia cena/m² per block/year...")
+print("\n[9/16] mined.variables ← średnia cena/m² per block/year...")
 with engine.connect() as conn:
     rows_ap = conn.execute(text("""
         SELECT
@@ -303,7 +306,7 @@ with engine.begin() as conn:
 print(f"      → {len(rows_ap)} wierszy → mined.variables (socVrAS00_avrg_00000000)")
 
 # ─── 10. osm.poi + osm.poly ← historyczne dane OSM ──────────────
-print("\n[10/13] osm.poi + osm.poly ← dane historyczne OSM...")
+print("\n[10/16] osm.poi + osm.poly ← dane historyczne OSM...")
 
 OSM_PATH = "data/source/osm_historic"
 
@@ -361,7 +364,7 @@ ldz_blocks_full = gpd.read_postgis(
 ldz_blocks_full["block_area"] = ldz_blocks_full.area   # m²
 
 # ─── 11. mined.variables ← OSM poi ──────────────────────────────
-print("\n[11/13] mined.variables ← OSM poi (count per block/year)...")
+print("\n[11/16] mined.variables ← OSM poi (count per block/year)...")
 
 DICT_OSM_POI = {
     "urVibSCBx_coun_00000000": ["arts_centre","bakery","bank","bar","beaty_shop","beverages",
@@ -413,7 +416,7 @@ with engine.begin() as conn:
 print(f"      → {len(osm_poi_vars)} wierszy → mined.variables (OSM poi)")
 
 # ─── 12. mined.variables ← OSM poly ─────────────────────────────
-print("\n[12/13] mined.variables ← OSM poly (area ratio per block/year)...")
+print("\n[12/16] mined.variables ← OSM poly (area ratio per block/year)...")
 
 DICT_OSM_POLY = {
     "bdEnvScrb_arrt_00000000": ["scrub"],
@@ -458,7 +461,7 @@ with engine.begin() as conn:
 print(f"      → {len(osm_poly_vars)} wierszy → mined.variables (OSM poly)")
 
 # ─── 13. meta.var_description ← OSM ─────────────────────────────
-print("\n[13/13] meta.var_description ← OSM...")
+print("\n[13/16] meta.var_description ← OSM...")
 
 OSM_META = [
     {"var_id": "urVibSCBx_coun_00000000", "unit": "count", "origin": "OSM",
@@ -493,6 +496,163 @@ with engine.begin() as conn:
         OSM_META,
     )
 print(f"      → {len(OSM_META)} metadanych OSM → meta.var_description")
+
+# ─── 14. mined.variables ← przystanki komunikacji miejskiej ─────
+# Odtwarza experiments/notebooks/transportation_poi.ipynb
+# (concated_transportation_df_fin).
+print("\n[14/16] mined.variables ← przystanki komunikacji miejskiej (OSM)...")
+
+TRANSPORT_PATH = "data/source/osm_historic/transportation.geojson"
+
+gdf_transport = gpd.read_file(TRANSPORT_PATH, driver="GeoJSON", encoding="utf-8")
+gdf_transport = gdf_transport.to_crs(ldz_blocks_full.crs)
+
+transport_rows = []
+for y in sorted(gdf_transport["year"].unique()):
+    poi_year = gdf_transport[gdf_transport["year"] == y]
+    joined_tr = gpd.sjoin(
+        poi_year,
+        ldz_blocks_full[["block_id", "geometry"]],
+        how="inner",
+        predicate="within",
+    ).drop(columns=["index_right"])
+    agg_tr = (
+        joined_tr.groupby("block_id")["osm_id"].count()
+        .reset_index()
+        .rename(columns={"osm_id": "value"})
+    )
+    # bloki bez przystanku w danym roku → 0 (nie NULL)
+    merged_tr = ldz_blocks_full[["block_id"]].merge(agg_tr, on="block_id", how="left")
+    merged_tr["value"] = merged_tr["value"].fillna(0).astype(float)
+    merged_tr["year"]  = pd.Timestamp(f"{int(y)}-01-01")
+    transport_rows.append(merged_tr)
+
+transport_vars = pd.concat(transport_rows, ignore_index=True)
+transport_vars["var_id"]   = "urVibTran_coun_00000000"
+transport_vars["block_id"] = transport_vars["block_id"].astype(int)
+transport_vars = transport_vars[["var_id", "year", "block_id", "value"]]
+
+with engine.begin() as conn:
+    conn.execute(
+        text("""
+            INSERT INTO mined.variables (var_id, year, block_id, value)
+            VALUES (:var_id, :year, :block_id, :value)
+            ON CONFLICT (var_id, year, block_id) DO UPDATE SET value = EXCLUDED.value
+        """),
+        transport_vars.to_dict("records"),
+    )
+print(f"      → {len(transport_vars)} wierszy → mined.variables (urVibTran_coun_00000000)")
+
+# ─── 15. mined.variables ← ceny działek budowlanych ─────────────
+# Odtwarza experiments/notebooks/transportation_poi.ipynb
+# (df_build_plots_prices_long_imputed_fin).
+# Rok transakcji brany — zgodnie z notebookiem — z TRAN_WERSJA_ID.
+# Bloki bez transakcji w danym roku dostają średnią z sąsiadów; przebiegi
+# powtarzane są do wypełnienia wszystkich bloków, więc po imputacji zmienna
+# pokrywa cały obszar. Zakres ograniczony do lat pokrytych danymi źródłowymi.
+print("\n[15/16] mined.variables ← średnia cena/m² działek budowlanych...")
+
+BUILD_PLOTS_PATH      = "data/source/build_plots_prices/build_plots_prices_2018_19.geojson"
+BUILD_PLOTS_LAST_YEAR = "2019-01-01"
+
+gdf_plots = gpd.read_file(BUILD_PLOTS_PATH, driver="GeoJSON", encoding="utf-8")
+gdf_plots = gdf_plots.to_crs(ldz_blocks_full.crs)
+gdf_plots["TRAN_CENA_BRUTTO"] = pd.to_numeric(gdf_plots["TRAN_CENA_BRUTTO"], errors="coerce")
+gdf_plots["plot_area"] = gdf_plots.geometry.area
+gdf_plots["value"]     = gdf_plots["TRAN_CENA_BRUTTO"] / gdf_plots["plot_area"]
+gdf_plots["year"] = pd.to_datetime(gdf_plots["TRAN_WERSJA_ID"]).dt.year.map(
+    lambda y: pd.Timestamp(f"{y}-01-01")
+)
+gdf_plots = gdf_plots[gdf_plots["value"].notna() & (gdf_plots["plot_area"] > 0)].copy()
+gdf_plots["geometry"] = gdf_plots.geometry.centroid
+
+plots_blocks = gpd.sjoin(
+    gdf_plots[["year", "value", "geometry"]],
+    ldz_blocks_full[["block_id", "geometry"]],
+    how="inner",
+    predicate="within",
+).drop(columns=["index_right"])
+
+plots_long = plots_blocks.groupby(["year", "block_id"])["value"].mean().reset_index()
+plots_long["block_id"] = plots_long["block_id"].astype(int)
+
+# sąsiedztwo bloków (bloki stykające się granicą)
+blocks_neighbors = gpd.sjoin(
+    ldz_blocks_full[["block_id", "geometry"]],
+    ldz_blocks_full[["block_id", "geometry"]],
+    how="inner",
+    predicate="intersects",
+)
+blocks_neighbors = blocks_neighbors[
+    blocks_neighbors["block_id_left"] != blocks_neighbors["block_id_right"]
+][["block_id_left", "block_id_right"]].rename(
+    columns={"block_id_left": "block_id", "block_id_right": "neighbor_id"}
+)
+
+plots_imputed = []
+for y in plots_long["year"].unique():
+    vals = ldz_blocks_full[["block_id"]].merge(
+        plots_long[plots_long["year"] == y][["block_id", "value"]],
+        on="block_id", how="left",
+    )
+    # kolejne przebiegi: bloki bez ceny biorą średnią z sąsiadów, w tym
+    # z sąsiadów uzupełnionych w poprzednim przebiegu
+    while vals["value"].isna().any():
+        neighbors_mean = (
+            blocks_neighbors.merge(
+                vals[["block_id", "value"]].rename(columns={"block_id": "neighbor_id"}),
+                on="neighbor_id", how="left",
+            )
+            .groupby("block_id")["value"].mean()
+        )
+        missing = vals["value"].isna()
+        vals.loc[missing, "value"] = vals.loc[missing, "block_id"].map(neighbors_mean)
+        # brak postępu (np. blok bez sąsiadów z ceną) → przerwij
+        if vals["value"].isna().sum() == missing.sum():
+            break
+    vals["year"] = y
+    plots_imputed.append(vals)
+
+plots_vars = pd.concat(plots_imputed, ignore_index=True)
+plots_vars = plots_vars[plots_vars["year"] <= BUILD_PLOTS_LAST_YEAR].copy()
+plots_vars = plots_vars[plots_vars["value"].notna()].copy()
+plots_vars["var_id"]   = "socVrBS00_avrg_00000000"
+plots_vars["block_id"] = plots_vars["block_id"].astype(int)
+plots_vars = plots_vars[["var_id", "year", "block_id", "value"]]
+
+with engine.begin() as conn:
+    conn.execute(
+        text("""
+            INSERT INTO mined.variables (var_id, year, block_id, value)
+            VALUES (:var_id, :year, :block_id, :value)
+            ON CONFLICT (var_id, year, block_id) DO UPDATE SET value = EXCLUDED.value
+        """),
+        plots_vars.to_dict("records"),
+    )
+print(f"      → {len(plots_vars)} wierszy → mined.variables (socVrBS00_avrg_00000000)")
+
+# ─── 16. meta.var_description ← urVibTran + socVrBS00 ───────────
+print("\n[16/16] meta.var_description ← urVibTran + socVrBS00...")
+
+NEW_VARS_META = [
+    {"var_id": "urVibTran_coun_00000000", "unit": "count", "origin": "OSM",
+     "description": "Number of public transport stops in urban block"},
+    {"var_id": "socVrBS00_avrg_00000000", "unit": "pln", "origin": "RCN",
+     "description": "average price of the building plots in urban block"},
+]
+
+with engine.begin() as conn:
+    conn.execute(
+        text("""
+            INSERT INTO meta.var_description (var_id, unit, origin, description)
+            VALUES (:var_id, :unit, :origin, :description)
+            ON CONFLICT (var_id) DO UPDATE
+                SET unit = EXCLUDED.unit, origin = EXCLUDED.origin,
+                    description = EXCLUDED.description
+        """),
+        NEW_VARS_META,
+    )
+print(f"      → {len(NEW_VARS_META)} metadanych → meta.var_description")
 
 print("\n" + "=" * 60)
 print("Bootstrap: DONE")
