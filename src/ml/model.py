@@ -144,7 +144,9 @@ def train(
         "model_type":  config.model_type,
         "random_seed": config.random_seed,
         "target_id":   config.target_variable,
-        "pre_period":  config.pre_period,
+        # The year actually used for the pre-period, which may differ from the
+        # configured one when the target has no data for it (see data_loader).
+        "pre_period":  int(data.target_pre_year or config.pre_period),
         "post_period": config.post_period,
         "run_at":      run_at,
     }])
@@ -156,7 +158,9 @@ def train(
     ])
 
     # ── features_df (→ results.features) ─────────────────────────────────────
-    sorted_confounders = sorted(data.actual_confounders)
+    # feature_no must follow the column order of data.X (the order the
+    # confounders were listed in the config), not alphabetical order —
+    # otherwise feature_no points at the wrong variable.
     features_df = pd.DataFrame([
         {
             "model_id":   config.model_id,
@@ -164,7 +168,7 @@ def train(
             "var_id":     var,
             "year":       data.confounder_years[var],
         }
-        for i, var in enumerate(sorted_confounders)
+        for i, var in enumerate(data.actual_confounders)
     ])
 
     # ── MLflow logging (optional, best-effort) ────────────────────────────────

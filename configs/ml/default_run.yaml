@@ -4,6 +4,8 @@
 # =============================================================================
 
 # --- Common model settings (shared across all CF models) ---------------------
+# Any model may override single hyperparameters in its own `hyperparameters`
+# block; whatever it does not mention is inherited from here.
 model_type: "Causal Forest with spatial spillovers of treatment"
 pre_period: 2019
 post_period: 2025
@@ -20,44 +22,90 @@ hyperparameters:
   random_state: 123
 
 # --- Per-model definitions ---------------------------------------------------
+# Causal structure: one target per model, confounders = controls/predictors.
+# Confounders are read at pre_period; if a variable has no row for that year,
+# the loader falls back within +/- pre_period_deviation years. Note that
+# socVrPopt_coun_00000000 (Census 2021) is therefore picked up from 2021 and
+# socVrBS00_avrg_00000000 from 2019 — the last year covered by the RCN extract.
 models:
 
   - model_id: "CF00000000001"
-    target_variable: "urVibBlPr_coun_00000000"
-    confounders:
-      - "urVibSCBx_coun_00000000"
-      - "socVrPopt_coun_00000000"
-      - "bdEnvFRab_arrt_00000000"
-      - "bdEnvFRxx_arrt_00000000"
-
-  - model_id: "CF00000000002"
     target_variable: "urVibSCBx_coun_00000000"
     confounders:
       - "socVrPopt_coun_00000000"
-      - "bdEnvFRab_arrt_00000000"
+      - "urVibTran_coun_00000000"
       - "bdEnvFRxx_arrt_00000000"
 
-  - model_id: "CF00000000003"
-    target_variable: "socVrEduc_avrg_00000000"
+  - model_id: "CF00000000002"
+    target_variable: "urVibBlPr_coun_00000000"
     confounders:
-      - "urVibSCBx_coun_00000000"
       - "socVrPopt_coun_00000000"
+      - "socVrBS00_avrg_00000000"
       - "bdEnvFRab_arrt_00000000"
-      - "bdEnvFRxx_arrt_00000000"
 
-# --- Optimization (ILP — PuLP CBC) -------------------------------------------
+  # urVibEnBl (buildings with registered entrepreneurs) is used rather than
+  # urVibEnAl (entrepreneurs): it is the same measure in both periods and is
+  # available for 2015 and 2025, so the pre/post difference is well defined.
+  # urVibEnAl exists for 2025 only. The loader resolves pre to 2015.
+  - model_id: "CF00000000003"
+    target_variable: "urVibEnBl_coun_00000000"
+    confounders:
+      - "socVrEduc_avrg_00000000"
+      - "socVrWage_avrg_00000000"
+    # This model is estimated on ~125 blocks, not 283, because the target and
+    # the social confounders cover only part of the zone. With honest splitting
+    # and subsampling that leaves roughly 28 observations per tree for the
+    # splits, so min_samples_leaf: 20 makes every tree a single leaf and the
+    # CATE comes out constant — no heterogeneity, zero-width confidence
+    # interval, nothing for the optimiser to rank blocks by. Verified on
+    # synthetic data of the same shape with heterogeneity present by
+    # construction: leaf 20 -> 1 distinct CATE, leaf 10 -> 61, leaf 5 -> 112.
+    hyperparameters:
+      min_samples_leaf: 5
+
+# --- Optimization (ILP — PuLP CBC, parallel budget sweep) --------------------
 optimization:
-  opt_id: "OP00000000001"
-  rf_model_id: "RF00000000001"   # which RF cost model to use for block costs
-  cost_limit: 400_000_000        # total budget (PLN)
+  # Optimization ids are generated sequentially from this one:
+  # OP00000000001, OP00000000002, ... one per budget scenario.
+  opt_id_start: "OP00000000001"
+  rf_model_id: "RF00000000001"   # which RF cost model supplies block costs
+
+  # Budget sweep (PLN). budget_max is exclusive, like Python range().
+  # 250m .. 500m step 5m  ->  51 scenarios
+  budget_min:  250_000_000
+  budget_max:  500_000_001
+  budget_step:   5_000_000
+
+  # Parallelism: how many ILP problems are solved at once, and the CBC time
+  # limit for a single problem (seconds). 12 jobs x 240 s.
+  n_jobs: 12
+  time_limit: 240
+
   spill_on_treated: true         # allow spillover on directly-treated blocks
   n_clusters: 1                  # number of connected components in solution
-  time_limit: 300                # CBC solver time limit (seconds)
-  normalize: true                # normalize uplift columns before optimization
+  # Scale each uplift column by its largest absolute value before the ILP, so
+  # the columns are comparable in magnitude while keeping their sign: a block
+  # with a negative uplift lowers the objective function instead of raising it.
+  normalize: true
 
-  # Per-model weights applied to uplift scores in the objective function.
-  # Missing model_ids default to 1.0. Weights are saved to results.optimization_weights_setup.
-  model_weights:
-    CF00000000001: 0.40
-    CF00000000002: 0.35
-    CF00000000003: 0.25
+  # Delete previous rows from results.optimization_summary,
+  # results.optimization_weights_setup and results.uplifts_optimization
+  # before writing this sweep. Prevents mixing scenarios across runs.
+  purge_previous: true
+
+  # Objective-function weights, one per uplift column — i.e. per
+  # (target_variable, treatment) pair. Column naming: <target>_<treatment>,
+  # where treatment is "d1nq" (direct) or "1nq" (spatial spillover).
+  #
+  # Only uplifts that turn out statistically significant enter the objective.
+  # With normalize_weights: true the raw weights of the significant ones are
+  # rescaled so that they sum to 1 (e.g. if only the four weights 0.5, 0.2,
+  # 0.3 and 0.5 survive, each is divided by 1.5).
+  normalize_weights: true
+  uplift_weights:
+    urVibSCBx_coun_00000000_d1nq: 0.5
+    urVibBlPr_coun_00000000_d1nq: 0.2
+    urVibEnBl_coun_00000000_d1nq: 0.3
+    urVibSCBx_coun_00000000_1nq:  0.5
+    urVibBlPr_coun_00000000_1nq:  0.2
+    urVibEnBl_coun_00000000_1nq:  0.3

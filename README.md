@@ -24,11 +24,15 @@ Treatment effects (uplifts) are estimated using **Causal Forest DML** (EconML), 
 - **Direct treatment** — blocks where regeneration projects were physically implemented
 - **Indirect treatment (spatial spillover)** — blocks adjacent to directly treated blocks, capturing neighbourhood-level effects
 
-Outcome models are estimated sequentially, each tracked as a separate MLflow experiment. The set of target variables is defined in the run configuration and may change as the research develops.
+Outcome models are estimated sequentially, each tracked as a separate MLflow experiment. The set of target variables and their confounders is defined in the run configuration and may change as the research develops.
+
+Variables in `mined.variables` do not all cover the same years or the same blocks, so the loader resolves this per model rather than assuming a common panel. Each variable is read at the configured pre-period where available, otherwise at the nearest earlier year still preceding the post-period; the year actually used is recorded in `results.models` and `results.features`. Y, X and T are then built on the intersection of the block sets of the target, every confounder and the block register, and the optimisation runs on the intersection of the block sets of all models entering the objective. Partial coverage therefore narrows the estimation sample in a logged, reproducible way instead of silently pairing mismatched blocks.
 
 ### 3.2 Policy Optimisation — Integer Linear Programming
 
-Future regeneration project allocation is framed as a budget-constrained ILP problem solved with **PuLP** (CBC solver). The objective function maximises a weighted sum of causal uplifts across all outcome models, subject to a budget constraint of 400 million PLN — approximately 40% of the ~1 billion PLN cost of the first 8 completed projects.
+Future regeneration project allocation is framed as a budget-constrained ILP problem solved with **PuLP** (CBC solver). The objective function maximises a weighted sum of causal uplifts, subject to a budget constraint and a connectivity constraint requiring the selected blocks to form a single contiguous area. Each uplift — one per (target variable, treatment arm) pair — carries its own weight; only uplifts that pass a significance test enter the objective, and their weights are rescaled to sum to 1.
+
+Rather than a single budget, the pipeline sweeps a configurable budget range, solving one ILP per scenario in parallel and recording the objective function value for each. The reference sweep runs from 250 to 500 million PLN in 5-million steps (51 scenarios); for context, the first 8 completed projects cost roughly 1 billion PLN in total. Because each solve is capped by a time limit, a scenario may return a feasible rather than proven-optimal solution, which is why the solver status is stored alongside the objective value.
 
 ### 3.3 Regeneration Cost Prediction — Random Forest
 
@@ -115,8 +119,14 @@ The PostGIS database is organised into the following schemas:
 | `mined` | Point-level POI data (small catering businesses, apartment prices, building permits, penalties, addresses, buildings), aggregated variables per block per year |
 | `osm` | Raw and processed OpenStreetMap POI and polygon layers |
 | `meta` | Variable descriptions and metadata |
-| `results` | ML model metadata, hyperparameters, feature importance, causal uplifts, RF cost predictions, SHAP values, ILP optimisation outputs |
+| `results` | ML model metadata, hyperparameters, feature importance, causal uplifts, RF cost predictions, SHAP values, ILP optimisation outputs (one row per budget scenario, plus the objective weights actually applied) |
 | `regeneration` | Regeneration project geometries and activity records |
+
+Schema changes are applied by the numbered files in `docker/postgres/init/`. They run automatically only when the PostGIS volume is created from scratch; on an existing database each migration is applied by hand, e.g.
+
+```bash
+docker exec -i urban_platform_db psql -U urban_user -d urban_db < docker/postgres/init/008_optimization_sweep.sql
+```
 
 ## 8. ETL Pipeline Overview
 

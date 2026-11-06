@@ -1,15 +1,24 @@
 """
-ILP Optimization — spatial block selection under budget constraint.
+ILP Optimization — spatial block selection under budget constraints.
 
-Replicates the "Optimization" section of optimization_experimenting.ipynb.
+Replicates the "Optimization – budget scenarios (parallel)" section of
+optimization_experimenting.ipynb.
 
 Steps:
   1. Read uplifts, models, costs, urban_blocks from DB
-  2. Find latest model per target_variable; determine minimum common block set
+  2. Restrict to the target variables configured for this run; pick the latest
+     model per target; determine the minimum common block set
   3. Check statistical significance of uplifts per (model, treatment)
-  4. Filter untreated blocks; build weighted uplift matrix
-  5. Run PuLP CBC ILP: maximize weighted uplift subject to budget + connectivity
-  6. Return uplifts_df_final_results and optimization_df_sum
+  4. Filter untreated blocks; build the uplift matrix for significant pairs
+  5. Weight each uplift column (per target_variable + treatment); optionally
+     rescale the weights of the significant columns so that they sum to 1
+  6. Solve one PuLP CBC ILP per budget scenario, n_jobs at a time
+  7. Return uplifts_final (all scenarios), summary (incl. the real objective
+     function value) and weights_df in long format
+
+The ILP itself is unchanged: maximize the weighted uplift of directly treated
+blocks plus the weighted spillover uplift of their neighbours, subject to a
+budget constraint and a single-commodity-flow connectivity constraint.
 """
 
 from __future__ import annotations
@@ -21,6 +30,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from src.ml.config import OptimizationConfig
@@ -83,25 +93,142 @@ def _build_neighborhood(gdf: gpd.GeoDataFrame) -> dict[int, list[int]]:
     return neigh
 
 
-def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
+def _resolve_weights(
+    uplift_cols: list[str],
+    configured: dict[str, float],
+    normalize: bool,
+) -> dict[str, float]:
     """
-    Full optimization pipeline matching optimization_experimenting.ipynb.
-    Reads from DB (CF uplifts + RF costs must already be saved).
+    Map each uplift column that survived the significance test to its weight.
+
+    Columns absent from the config default to 1.0. When normalize is True the
+    weights are divided by their sum, so the weights of the columns actually
+    entering the objective add up to 1.
+    """
+    raw: dict[str, float] = {}
+    for col in uplift_cols:
+        if col in configured:
+            raw[col] = float(configured[col])
+        else:
+            log.warning("No weight configured for uplift column %s — using 1.0", col)
+            raw[col] = 1.0
+
+    if not normalize:
+        return raw
+
+    total = sum(raw.values())
+    if total <= 0:
+        log.warning("Sum of weights is %s — skipping normalization", total)
+        return raw
+
+    normalized = {col: w / total for col, w in raw.items()}
+    log.info(
+        "Weights normalized by %.4f: %s",
+        total,
+        {c: round(w, 6) for c, w in normalized.items()},
+    )
+    return normalized
+
+
+def _solve_scenario(
+    cost_limit: float,
+    opt_id: str,
+    a: np.ndarray,
+    b: np.ndarray,
+    cost: np.ndarray,
+    neigh: dict[int, list[int]],
+    arcs: list[tuple[int, int]],
+    n: int,
+    n_clusters: int,
+    spill_on_treated: bool,
+    time_limit: int,
+) -> dict:
+    """
+    Solve the MILP for a single budget limit.
+
+    Module-level and self-contained so joblib's loky backend can ship it to a
+    worker process. CBC is an external process, so threads=... is deliberately
+    not passed (the bundled CBC fails on it under Windows).
     """
     import pulp
+    import numpy as np  # re-imported: runs in a separate process
 
-    log.info("=== Optimization: %s ===", config.opt_id)
+    prob = pulp.LpProblem(f"revitalization_{opt_id}", pulp.LpMaximize)
+
+    x = pulp.LpVariable.dicts("x", range(n), cat="Binary")   # directly treated
+    y = pulp.LpVariable.dicts("y", range(n), cat="Binary")   # has >=1 treated neighbour
+    r = pulp.LpVariable.dicts("r", range(n), cat="Binary")   # cluster root
+    f = pulp.LpVariable.dicts("f", arcs, lowBound=0)         # flow
+    s = pulp.LpVariable.dicts("s", range(n), lowBound=0)     # supply at root
+
+    # Objective
+    prob += (
+        pulp.lpSum(a[i] * x[i] for i in range(n)) +
+        pulp.lpSum(b[i] * y[i] for i in range(n))
+    )
+
+    # Budget (direct treatment cost only)
+    prob += pulp.lpSum(cost[i] * x[i] for i in range(n)) <= cost_limit, "budget"
+
+    # Spillover: y_i = 1 only if at least one neighbour is treated
+    BIG = n
+    for i in range(n):
+        if neigh[i]:
+            prob += y[i] <= pulp.lpSum(x[j] for j in neigh[i]), f"spill_{i}"
+        else:
+            prob += y[i] == 0, f"spill_{i}"
+        if not spill_on_treated:
+            prob += y[i] + x[i] <= 1, f"nodouble_{i}"
+
+    # Connectivity: single-commodity flow
+    for i in range(n):
+        inflow  = pulp.lpSum(f[(j, i)] for j in neigh[i])
+        outflow = pulp.lpSum(f[(i, j)] for j in neigh[i])
+        prob += inflow + s[i] - outflow == x[i], f"flow_{i}"
+        prob += s[i] <= BIG * r[i], f"supply_{i}"
+        prob += r[i] <= x[i], f"root_sel_{i}"
+
+    for (i, j) in arcs:
+        prob += f[(i, j)] <= BIG * x[i], f"cap_i_{i}_{j}"
+        prob += f[(i, j)] <= BIG * x[j], f"cap_j_{i}_{j}"
+
+    prob += pulp.lpSum(r[i] for i in range(n)) == n_clusters, "n_roots"
+
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit))
+
+    sel  = np.array([int(round(x[i].value() or 0)) for i in range(n)], dtype=bool)
+    spil = np.array([int(round(y[i].value() or 0)) for i in range(n)], dtype=bool)
+
+    objective = pulp.value(prob.objective)
+
+    return {
+        "optimization_id": opt_id,
+        "cost_limit":      float(cost_limit),
+        "solver_status":   pulp.LpStatus[prob.status],
+        "solution_status": pulp.LpSolution[prob.sol_status],
+        "objective":       None if objective is None else float(objective),
+        "sel":             sel,
+        "spil":            spil & ~sel,
+    }
+
+
+def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
+    """
+    Full optimization sweep matching optimization_experimenting.ipynb.
+    Reads from DB (CF uplifts + RF costs must already be saved).
+    """
+    log.info("=== Optimization sweep: %s ===", config.opt_id_start)
 
     # ── 1. Load data from DB ──────────────────────────────────────────────────
     log.info("Loading data from DB...")
-    uplifts_df       = pd.read_sql("SELECT * FROM results.uplifts",           engine)
-    models_df        = pd.read_sql("SELECT * FROM results.models",             engine)
+    uplifts_df       = pd.read_sql("SELECT * FROM results.uplifts",    engine)
+    models_df        = pd.read_sql("SELECT * FROM results.models",     engine)
     pred_prices_df   = pd.read_sql(
-        f"SELECT block_id, costs FROM results.predicted_reg_prices "
-        f"WHERE model_id = '{config.rf_model_id}'",
-        engine,
+        text("SELECT block_id, costs FROM results.predicted_reg_prices "
+             "WHERE model_id = :rf_model_id"),
+        engine, params={"rf_model_id": config.rf_model_id},
     )
-    urban_blocks_ng  = pd.read_sql("SELECT * FROM core.urban_blocks",          engine)
+    urban_blocks_ng  = pd.read_sql("SELECT * FROM core.urban_blocks", engine)
     urban_blocks_gdf = gpd.read_postgis(
         "SELECT block_id, geometry FROM core.urban_blocks_geom",
         engine, geom_col="geometry",
@@ -113,13 +240,18 @@ def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
             "Run the RF cost pipeline first."
         )
 
-    # ── 2. Determine target variables from all CF model_ids in DB ────────────
-    # Use only CF models (model_id starts with 'CF')
+    # ── 2. Latest CF model per configured target variable ────────────────────
     cf_models = models_df[models_df["model_id"].str.startswith("CF")].copy()
-    list_of_target_vars = cf_models["target_id"].unique().tolist()
-    log.info("Target variables found: %s", list_of_target_vars)
+    if config.target_variables:
+        cf_models = cf_models[cf_models["target_id"].isin(config.target_variables)].copy()
+        missing = set(config.target_variables) - set(cf_models["target_id"])
+        if missing:
+            raise RuntimeError(
+                f"No CF model in results.models for target variable(s): {sorted(missing)}. "
+                "Train the CF models first."
+            )
+    log.info("Target variables used: %s", cf_models["target_id"].unique().tolist())
 
-    # Latest model per target_id
     models_dict: dict[str, str] = (
         cf_models
         .sort_values("run_at")
@@ -128,22 +260,45 @@ def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
         .to_dict()
     )
     list_of_models = list(models_dict.keys())
+    target_to_model = {target: model for model, target in models_dict.items()}
     log.info("Using models: %s", models_dict)
 
-    # ── 3. Find minimum common block set ─────────────────────────────────────
-    block_counts = (
-        uplifts_df[uplifts_df["model_id"].isin(list_of_models)]
-        ["model_id"].value_counts().to_dict()
-    )
-    min_model_id = min(block_counts, key=block_counts.get)
-    min_block_ids = (
-        uplifts_df[uplifts_df["model_id"] == min_model_id]["block_id"].unique().tolist()
-    )
-    log.info("Min block set from model %s: %d blocks", min_model_id, len(min_block_ids))
+    # ── 3. Common block set across all models ────────────────────────────────
+    # Models may be estimated on different block sets (a target or confounder
+    # with partial coverage narrows the sample — see data_loader). The
+    # optimization has to run on blocks that every selected model scored,
+    # otherwise the pivot below would turn a missing uplift into a zero one.
+    sel_for_blocks = uplifts_df[uplifts_df["model_id"].isin(list_of_models)]
+    if sel_for_blocks.empty:
+        raise RuntimeError(
+            "results.uplifts contains no rows for the selected models — "
+            "train the CF models first."
+        )
 
-    # ── 4. Treated blocks at post_period ─────────────────────────────────────
-    post_ts = pd.Timestamp(f"{list(models_dict.values()) and cf_models['post_period'].max()}-01-01")
-    # Use post_period from the models table
+    per_model_blocks = {
+        model_id: set(group["block_id"])
+        for model_id, group in sel_for_blocks.groupby("model_id")
+    }
+    common_blocks = set.intersection(*per_model_blocks.values())
+
+    log.info("Block coverage per model:")
+    for model_id, ids in sorted(per_model_blocks.items()):
+        log.info(
+            "  %-16s %-28s %4d blocks  (%d outside the common set)",
+            model_id, models_dict.get(model_id, "?"), len(ids), len(ids - common_blocks),
+        )
+    log.info("  %-45s %4d blocks  <- optimization runs on this set",
+             "INTERSECTION", len(common_blocks))
+
+    if not common_blocks:
+        raise RuntimeError(
+            "The selected models share no block_id: "
+            + ", ".join(f"{m}: {len(b)}" for m, b in sorted(per_model_blocks.items()))
+        )
+
+    min_block_ids = sorted(common_blocks)
+
+    # ── 4. Treated / untreated blocks at post_period ─────────────────────────
     post_period = int(cf_models["post_period"].max())
     post_ts = pd.Timestamp(f"{post_period}-01-01")
 
@@ -208,6 +363,19 @@ def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
     )
     uplifts_wide.columns.name = None
 
+    # Every block in the matrix must have an uplift for every significant pair.
+    # A gap here would be read as a zero uplift by the fillna below and would
+    # quietly make that block look unattractive rather than unknown.
+    value_cols = [c for c in uplifts_wide.columns if c != "block_id"]
+    gaps = uplifts_wide[value_cols].isna()
+    if gaps.any().any():
+        missing = gaps.sum().loc[lambda s: s > 0].to_dict()
+        raise RuntimeError(
+            "Missing uplifts in the optimization matrix after restricting to the "
+            f"common block set: {missing}. This should not happen — check "
+            "results.uplifts for partially written models."
+        )
+
     uplifts_for_opt = uplifts_wide.merge(
         pred_prices_df[["block_id", "costs"]], on="block_id", how="left"
     )
@@ -217,7 +385,6 @@ def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
 
     log.info("Optimization matrix: %d blocks × %d columns", *uplifts_for_opt_gdf.shape)
 
-    # ── 7. Build neighborhood ─────────────────────────────────────────────────
     gdf = uplifts_for_opt_gdf.reset_index(drop=True)
     n   = len(gdf)
 
@@ -227,154 +394,184 @@ def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
     log.info("Indirect cols (%d): %s", len(indirect_cols), indirect_cols)
 
     U = gdf[direct_cols + indirect_cols].astype(float).fillna(0.0)
+
+    # Drop uplift columns with no variation across the candidate blocks. A model
+    # that predicts the same effect everywhere carries no information about
+    # which block to pick, and min-max normalization maps such a column to all
+    # zeros — so keeping it would reserve weight for a column contributing
+    # exactly nothing, diluting the models that do vary.
+    spread = (U.max() - U.min()).abs()
+    flat_cols = spread[spread <= 1e-12].index.tolist()
+    if flat_cols:
+        log.warning(
+            "Uplift column(s) constant across all %d candidate blocks — excluded "
+            "from the objective and from weight normalization: %s",
+            len(U), flat_cols,
+        )
+        log.warning(
+            "A constant CATE means the causal forest found no heterogeneity. Such "
+            "a column says nothing about which block to treat — it would only add "
+            "a flat per-block bonus and tilt the solution towards picking more "
+            "blocks, which is an artefact of the degenerate fit, not evidence."
+        )
+        direct_cols   = [c for c in direct_cols   if c not in flat_cols]
+        indirect_cols = [c for c in indirect_cols if c not in flat_cols]
+        U = U.drop(columns=flat_cols)
+        if not direct_cols and not indirect_cols:
+            raise RuntimeError(
+                "Every uplift column is constant across blocks — the objective "
+                "function would be identically zero and the selection arbitrary."
+            )
+
     if config.normalize:
-        rng = U.max() - U.min()
-        U = (U - U.min()) / rng.replace(0, 1)
+        # Sign-preserving scaling: divide each column by its largest absolute
+        # value, mapping it into [-1, 1] with zero fixed at zero. Uplift columns
+        # become comparable in magnitude while a negative uplift stays negative
+        # and therefore lowers the objective function.
+        #
+        # NOT min-max ((U - min) / (max - min)): that maps every column onto
+        # [0, 1] regardless of sign, so an outcome the programme damages would
+        # enter the objective as a gain.
+        scale = U.abs().max()
+        U = U / scale.replace(0, 1)
+        log.info(
+            "Uplift columns scaled by max|value| (sign preserved): %s",
+            {c: round(float(v), 4) for c, v in scale.items()},
+        )
+        negatives = {c: int((U[c] < 0).sum()) for c in U.columns if (U[c] < 0).any()}
+        if negatives:
+            log.info(
+                "Blocks with a negative (objective-lowering) uplift per column: %s",
+                negatives,
+            )
 
-    # Build target_id → weight lookup (model_weights keyed by model_id)
-    # models_dict: {model_id: target_id}  →  reverse to {target_id: weight}
-    target_weights: dict[str, float] = {
-        target_id: config.model_weights.get(model_id, 1.0)
-        for model_id, target_id in models_dict.items()
-    }
-    if config.model_weights:
-        log.info("Model weights: %s", config.model_weights)
-        log.info("Target weights: %s", target_weights)
-    else:
-        log.info("No model_weights configured — all columns weighted equally (1.0)")
+    # ── 7. Weights per uplift column, normalized over significant columns ────
+    weights = _resolve_weights(
+        direct_cols + indirect_cols,
+        config.uplift_weights,
+        config.normalize_weights,
+    )
 
-    # Weighted sum: a[i] = Σ w_col * U[col][i]  for direct cols
     a = np.zeros(n)
     for col in direct_cols:
-        target_id = col[:-5]          # strip "_d1nq"
-        a += target_weights.get(target_id, 1.0) * U[col].values
+        a += weights[col] * U[col].values
 
-    # Weighted sum: b[i] = Σ w_col * U[col][i]  for indirect cols
     b = np.zeros(n)
     for col in indirect_cols:
-        target_id = col[:-4]          # strip "_1nq"
-        b += target_weights.get(target_id, 1.0) * U[col].values
+        b += weights[col] * U[col].values
 
     cost = gdf["costs"].astype(float).values
+    if np.isnan(cost).any():
+        n_nan = int(np.isnan(cost).sum())
+        raise RuntimeError(
+            f"{n_nan} block(s) in the optimization matrix have no RF cost prediction "
+            f"for rf_model_id='{config.rf_model_id}'."
+        )
 
     neigh = _build_neighborhood(gdf)
     arcs  = [(i, j) for i in range(n) for j in neigh[i]]
 
-    # ── 8. ILP ────────────────────────────────────────────────────────────────
-    log.info("Building ILP (n=%d, arcs=%d)...", n, len(arcs))
-    prob = pulp.LpProblem("revitalization", pulp.LpMaximize)
+    # ── 8. Parallel budget sweep ──────────────────────────────────────────────
+    from joblib import Parallel, delayed
 
-    x = pulp.LpVariable.dicts("x", range(n), cat="Binary")   # directly treated
-    y = pulp.LpVariable.dicts("y", range(n), cat="Binary")   # has ≥1 treated neighbour
-    r = pulp.LpVariable.dicts("r", range(n), cat="Binary")   # cluster root
-    f = pulp.LpVariable.dicts("f", arcs, lowBound=0)         # flow
-    s = pulp.LpVariable.dicts("s", range(n), lowBound=0)     # supply at root
-
-    # Objective
-    prob += (
-        pulp.lpSum(a[i] * x[i] for i in range(n)) +
-        pulp.lpSum(b[i] * y[i] for i in range(n))
-    )
-
-    # Budget (direct treatment cost only)
-    prob += pulp.lpSum(cost[i] * x[i] for i in range(n)) <= config.cost_limit, "budget"
-
-    # Spillover: y_i = 1 only if at least one neighbour is treated
-    BIG = n
-    for i in range(n):
-        if neigh[i]:
-            prob += y[i] <= pulp.lpSum(x[j] for j in neigh[i]), f"spill_{i}"
-        else:
-            prob += y[i] == 0, f"spill_{i}"
-        if not config.spill_on_treated:
-            prob += y[i] + x[i] <= 1, f"nodouble_{i}"
-
-    # Connectivity: single-commodity flow
-    for i in range(n):
-        inflow  = pulp.lpSum(f[(j, i)] for j in neigh[i])
-        outflow = pulp.lpSum(f[(i, j)] for j in neigh[i])
-        prob += inflow + s[i] - outflow == x[i], f"flow_{i}"
-        prob += s[i] <= BIG * r[i], f"supply_{i}"
-        prob += r[i] <= x[i], f"root_sel_{i}"
-
-    for (i, j) in arcs:
-        prob += f[(i, j)] <= BIG * x[i], f"cap_i_{i}_{j}"
-        prob += f[(i, j)] <= BIG * x[j], f"cap_j_{i}_{j}"
-
-    prob += pulp.lpSum(r[i] for i in range(n)) == config.n_clusters, "n_roots"
-
-    log.info("Solving ILP (time_limit=%ds)...", config.time_limit)
-    status = prob.solve(pulp.PULP_CBC_CMD(msg=1, timeLimit=config.time_limit))
+    budget_limits = config.budget_limits
+    opt_ids       = config.opt_ids
     log.info(
-        "Solver status: %s | objective: %.4f",
-        pulp.LpStatus[prob.status], pulp.value(prob.objective),
+        "Solving %d ILP scenarios (n=%d, arcs=%d) — n_jobs=%d, time_limit=%ds each",
+        len(budget_limits), n, len(arcs), config.n_jobs, config.time_limit,
     )
-
-    # ── 9. Extract solution ───────────────────────────────────────────────────
-    sel  = np.array([int(round(x[i].value() or 0)) for i in range(n)], dtype=bool)
-    spil = np.array([int(round(y[i].value() or 0)) for i in range(n)], dtype=bool)
-
-    res = gdf.copy()
-    res["treated_direct"]    = sel
-    res["treated_spillover"] = spil & ~sel
-
-    selected_direct_ids   = res[res["treated_direct"]]["block_id"].unique().tolist()
-    selected_spillover_ids = res[res["treated_spillover"]]["block_id"].unique().tolist()
-    cost_used = float(cost[sel].sum())
     log.info(
-        "Selected: %d direct | %d spillover | cost used: %.0f / %.0f",
-        len(selected_direct_ids), len(selected_spillover_ids),
-        cost_used, config.cost_limit,
+        "Budget range: %s .. %s step %s",
+        f"{budget_limits[0]:,.0f}",
+        f"{budget_limits[-1]:,.0f}",
+        f"{config.budget_step:,.0f}",
     )
 
-    # ── 10. Build output dataframes matching notebook ─────────────────────────
-    # Rebuild from original uplifts_df (with original model_ids, not target_ids)
+    scenario_results = Parallel(n_jobs=config.n_jobs, backend="loky", verbose=5)(
+        delayed(_solve_scenario)(
+            cost_limit, opt_id, a, b, cost, neigh, arcs, n,
+            config.n_clusters, config.spill_on_treated, config.time_limit,
+        )
+        for cost_limit, opt_id in zip(budget_limits, opt_ids)
+    )
+
+    for res_k in scenario_results:
+        log.info(
+            "  %s  budget=%12.0f  %s / %s  objective=%s  direct=%d  spillover=%d",
+            res_k["optimization_id"], res_k["cost_limit"],
+            res_k["solver_status"], res_k["solution_status"],
+            "n/a" if res_k["objective"] is None else f"{res_k['objective']:.4f}",
+            int(res_k["sel"].sum()), int(res_k["spil"].sum()),
+        )
+
+    # ── 9. Assemble per-scenario uplift rows ─────────────────────────────────
     uplifts_tagged = uplifts_df.copy()
     uplifts_tagged["target_id"] = uplifts_tagged["model_id"].replace(models_dict)
 
-    d1nq_results = uplifts_tagged[
-        (uplifts_tagged["treatment"] == "d1nq") &
-        (uplifts_tagged["target_id"].isin([c[:-5] for c in direct_cols])) &
-        (uplifts_tagged["block_id"].isin(selected_direct_ids))
-    ]
-    onq_results = uplifts_tagged[
-        (uplifts_tagged["treatment"] == "1nq") &
-        (uplifts_tagged["target_id"].isin([c[:-4] for c in indirect_cols])) &
-        (uplifts_tagged["block_id"].isin(selected_spillover_ids))
-    ]
+    direct_targets   = [c[:-5] for c in direct_cols]    # strip "_d1nq"
+    indirect_targets = [c[:-4] for c in indirect_cols]  # strip "_1nq"
+
+    uplift_parts = []
+    for res_k in scenario_results:
+        direct_blocks    = gdf.loc[res_k["sel"],  "block_id"].unique().tolist()
+        spillover_blocks = gdf.loc[res_k["spil"], "block_id"].unique().tolist()
+
+        part_d1nq = uplifts_tagged[
+            (uplifts_tagged["treatment"] == "d1nq") &
+            (uplifts_tagged["target_id"].isin(direct_targets)) &
+            (uplifts_tagged["block_id"].isin(direct_blocks))
+        ]
+        part_1nq = uplifts_tagged[
+            (uplifts_tagged["treatment"] == "1nq") &
+            (uplifts_tagged["target_id"].isin(indirect_targets)) &
+            (uplifts_tagged["block_id"].isin(spillover_blocks))
+        ]
+        part = pd.concat([part_d1nq, part_1nq]).copy()
+        part["optimization_id"] = res_k["optimization_id"]
+        uplift_parts.append(part)
 
     uplifts_final = (
-        pd.concat([d1nq_results, onq_results])
+        pd.concat(uplift_parts)
         .drop(columns=["target_id"])
         .reset_index(drop=True)
     )
-    uplifts_final["optimization_id"] = config.opt_id
     uplifts_final = uplifts_final[
         ["optimization_id", "model_id", "block_id", "treatment", "uplift"]
     ]
-    log.info("uplifts_final: %d rows", len(uplifts_final))
+    log.info("uplifts_final: %d rows across %d scenarios",
+             len(uplifts_final), len(scenario_results))
 
+    # ── 10. Summary — one row per scenario, with the real objective value ────
     run_at = datetime.datetime.now(tz=datetime.timezone.utc)
-    opt_summary = pd.DataFrame([{
-        "optimization_id":      config.opt_id,
-        "cost_used":            cost_used,
-        "cost_limit":           config.cost_limit,
-        "treatment_spillovers": config.spill_on_treated,
-        "clusters_number":      config.n_clusters,
-        "time_limit":           config.time_limit,
-        "run_at":               run_at,
-    }])
-
-    # Weights table — one row per model_id that appears in models_dict
-    effective_weights = {
-        model_id: config.model_weights.get(model_id, 1.0)
-        for model_id in models_dict
-    }
-    weights_df = pd.DataFrame([
-        {"optimization_id": config.opt_id, "model_id": mid, "weight": w}
-        for mid, w in effective_weights.items()
+    opt_summary = pd.DataFrame([
+        {
+            "optimization_id":          res_k["optimization_id"],
+            "cost_used":                float(cost[res_k["sel"]].sum()),
+            "cost_limit":               res_k["cost_limit"],
+            "objective_function_value": res_k["objective"],
+            "solver_status":            res_k["solver_status"],
+            "solution_status":          res_k["solution_status"],
+            "treatment_spillovers":     config.spill_on_treated,
+            "clusters_number":          config.n_clusters,
+            "time_limit":               config.time_limit,
+            "run_at":                   run_at,
+        }
+        for res_k in scenario_results
     ])
-    log.info("weights_df: %d rows", len(weights_df))
+
+    # ── 11. Weights, long format — one row per (optimization, model, uplift) ─
+    weights_df = pd.DataFrame([
+        {
+            "optimization_id": res_k["optimization_id"],
+            "model_id":        target_to_model[col[:-5] if col.endswith("_d1nq") else col[:-4]],
+            "uplift":          col,
+            "uplift_weight":   weight,
+        }
+        for res_k in scenario_results
+        for col, weight in weights.items()
+    ])
+    log.info("weights_df: %d rows (%d uplift columns × %d scenarios)",
+             len(weights_df), len(weights), len(scenario_results))
 
     return OptimizationResult(
         uplifts_final=uplifts_final,

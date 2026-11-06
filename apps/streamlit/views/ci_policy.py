@@ -8,6 +8,7 @@ Right bottom: budget pie chart.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
@@ -174,3 +175,17 @@ def render(interactive: bool = True) -> None:
             st.metric("Budget limit (PLN)", f"{row['cost_limit']:,.0f}")
             st.metric("Budget used (PLN)",  f"{row['cost_used']:,.0f}")
             st.metric("Remaining (PLN)",    f"{row['cost_limit'] - row['cost_used']:,.0f}")
+
+            if "objective_function_value" in row.index and pd.notna(
+                row["objective_function_value"]
+            ):
+                st.metric(
+                    "Objective function value",
+                    f"{float(row['objective_function_value']):.4f}",
+                )
+                status = row.get("solution_status")
+                if isinstance(status, str) and status and status != "Optimal":
+                    st.caption(
+                        f"Solver stopped at the time limit — solution is "
+                        f"'{status}', not proven optimal."
+                    )

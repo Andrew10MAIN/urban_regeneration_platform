@@ -8,8 +8,13 @@ Tables written by save_results() (per CF model):
   results.uplifts          — uplift_long  (ON CONFLICT DO UPDATE)
 
 Tables written by save_optimization():
-  results.uplifts_optimization  — uplifts_final  (ON CONFLICT DO UPDATE)
-  results.optimization_summary  — summary        (ON CONFLICT DO UPDATE)
+  results.uplifts_optimization       — uplifts_final  (ON CONFLICT DO UPDATE)
+  results.optimization_summary       — summary        (ON CONFLICT DO UPDATE)
+  results.optimization_weights_setup — weights_df     (ON CONFLICT DO UPDATE)
+
+A budget sweep writes one summary row and one weights block per scenario, so
+these three tables hold many optimization_ids at a time. Pass purge=True to
+clear them before writing a fresh sweep.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ from __future__ import annotations
 import logging
 import pandas as pd
 from sqlalchemy.engine import Engine
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +82,16 @@ def _upsert_features(df: pd.DataFrame, engine: Engine) -> int:
 
 
 def _upsert_uplifts(df: pd.DataFrame, engine: Engine) -> int:
+    """
+    Replace the uplifts of each model present in df.
+
+    Rows are deleted per model_id first, because a model_id may be re-pointed
+    at a different target variable between runs. A plain upsert would then
+    leave uplifts of the previous target behind for any block the new model
+    does not cover, silently mixing two causal structures in one model_id.
+    """
     rows = df.to_dict(orient="records")
+    model_ids = sorted(df["model_id"].unique().tolist())
     sql = text("""
         INSERT INTO results.uplifts (block_id, model_id, treatment, uplift)
         VALUES (:block_id, :model_id, :treatment, :uplift)
@@ -86,10 +100,17 @@ def _upsert_uplifts(df: pd.DataFrame, engine: Engine) -> int:
     """)
     total = 0
     with engine.begin() as conn:
+        delete_sql = text(
+            "DELETE FROM results.uplifts WHERE model_id IN :model_ids"
+        ).bindparams(bindparam("model_ids", expanding=True))
+        deleted = conn.execute(delete_sql, {"model_ids": model_ids}).rowcount
         for i in range(0, len(rows), BATCH):
             conn.execute(sql, rows[i : i + BATCH])
             total += len(rows[i : i + BATCH])
-    log.info("results.uplifts: upserted %d row(s)", total)
+    log.info(
+        "results.uplifts: deleted %d stale row(s) for %s, inserted %d row(s)",
+        deleted or 0, model_ids, total,
+    )
     return total
 
 
@@ -129,18 +150,23 @@ def _upsert_optimization_summary(df: pd.DataFrame, engine: Engine) -> int:
     rows = df.to_dict(orient="records")
     sql = text("""
         INSERT INTO results.optimization_summary
-            (optimization_id, cost_used, cost_limit, treatment_spillovers,
+            (optimization_id, cost_used, cost_limit, objective_function_value,
+             solver_status, solution_status, treatment_spillovers,
              clusters_number, time_limit, run_at)
         VALUES
-            (:optimization_id, :cost_used, :cost_limit, :treatment_spillovers,
+            (:optimization_id, :cost_used, :cost_limit, :objective_function_value,
+             :solver_status, :solution_status, :treatment_spillovers,
              :clusters_number, :time_limit, :run_at)
         ON CONFLICT (optimization_id) DO UPDATE SET
-            cost_used            = EXCLUDED.cost_used,
-            cost_limit           = EXCLUDED.cost_limit,
-            treatment_spillovers = EXCLUDED.treatment_spillovers,
-            clusters_number      = EXCLUDED.clusters_number,
-            time_limit           = EXCLUDED.time_limit,
-            run_at               = EXCLUDED.run_at
+            cost_used                = EXCLUDED.cost_used,
+            cost_limit               = EXCLUDED.cost_limit,
+            objective_function_value = EXCLUDED.objective_function_value,
+            solver_status            = EXCLUDED.solver_status,
+            solution_status          = EXCLUDED.solution_status,
+            treatment_spillovers     = EXCLUDED.treatment_spillovers,
+            clusters_number          = EXCLUDED.clusters_number,
+            time_limit               = EXCLUDED.time_limit,
+            run_at                   = EXCLUDED.run_at
     """)
     with engine.begin() as conn:
         conn.execute(sql, rows)
@@ -151,23 +177,53 @@ def _upsert_optimization_summary(df: pd.DataFrame, engine: Engine) -> int:
 def _upsert_optimization_weights(df: pd.DataFrame, engine: Engine) -> int:
     rows = df.to_dict(orient="records")
     sql = text("""
-        INSERT INTO results.optimization_weights_setup (optimization_id, model_id, weight)
-        VALUES (:optimization_id, :model_id, :weight)
-        ON CONFLICT (optimization_id, model_id) DO UPDATE SET
-            weight = EXCLUDED.weight
+        INSERT INTO results.optimization_weights_setup
+            (optimization_id, model_id, uplift, uplift_weight)
+        VALUES
+            (:optimization_id, :model_id, :uplift, :uplift_weight)
+        ON CONFLICT (optimization_id, model_id, uplift) DO UPDATE SET
+            uplift_weight = EXCLUDED.uplift_weight
     """)
+    total = 0
     with engine.begin() as conn:
-        conn.execute(sql, rows)
-    log.info("results.optimization_weights_setup: upserted %d row(s)", len(rows))
-    return len(rows)
+        for i in range(0, len(rows), BATCH):
+            conn.execute(sql, rows[i : i + BATCH])
+            total += len(rows[i : i + BATCH])
+    log.info("results.optimization_weights_setup: upserted %d row(s)", total)
+    return total
 
 
-def save_optimization(result, engine: Engine) -> dict[str, int]:
+def purge_optimization(engine: Engine) -> dict[str, int]:
+    """
+    Delete all rows from the three optimization result tables.
+
+    Used before writing a new budget sweep, so that scenario ids left over
+    from an earlier sweep (a longer range, or a different weight setup) cannot
+    survive alongside the current one.
+    """
+    counts: dict[str, int] = {}
+    with engine.begin() as conn:
+        for table in (
+            "results.uplifts_optimization",
+            "results.optimization_weights_setup",
+            "results.optimization_summary",
+        ):
+            counts[table] = conn.execute(text(f"DELETE FROM {table}")).rowcount or 0
+    log.info("Purged previous optimization results: %s", counts)
+    return counts
+
+
+def save_optimization(result, engine: Engine, purge: bool = False) -> dict[str, int]:
     """Persist optimization results to the database."""
-    opt_id = result.summary["optimization_id"].iloc[0]
-    log.info("Saving optimization results [%s]...", opt_id)
+    opt_ids = result.summary["optimization_id"].tolist()
+    log.info(
+        "Saving optimization results — %d scenario(s): %s ... %s",
+        len(opt_ids), opt_ids[0], opt_ids[-1],
+    )
+    if purge:
+        purge_optimization(engine)
     return {
-        "results.optimization_summary":      _upsert_optimization_summary(result.summary, engine),
+        "results.optimization_summary":       _upsert_optimization_summary(result.summary, engine),
         "results.optimization_weights_setup": _upsert_optimization_weights(result.weights_df, engine),
         "results.uplifts_optimization":       _upsert_uplifts_optimization(result.uplifts_final, engine),
     }

@@ -41,7 +41,10 @@ def parse_args() -> argparse.Namespace:
         default=str(ROOT / "configs" / "ml" / "default_run.yaml"),
         help="Path to YAML config",
     )
-    p.add_argument("--no-db",           action="store_true", help="Skip DB writes")
+    p.add_argument(
+        "--no-db", action="store_true",
+        help="Skip DB writes (input data is still read from the database)",
+    )
     p.add_argument("--no-mlflow",       action="store_true", help="Skip MLflow logging")
     p.add_argument("--no-optimization", action="store_true", help="Skip ILP optimization step")
     return p.parse_args()
@@ -70,15 +73,17 @@ def main() -> int:
     log.info(config.summary())
 
     # ── DB connection ─────────────────────────────────────────────────────────
-    engine = None
-    if not args.no_db:
-        db_url = os.environ.get("DATABASE_URL")
-        if not db_url:
-            log.error("DATABASE_URL not set. Use --no-db for a dry run.")
-            return 1
-        from sqlalchemy import create_engine
-        engine = create_engine(db_url, pool_pre_ping=True)
-        log.info("DB connected: %s", db_url.split("@")[-1])
+    # The connection is always needed: urban_blocks and mined.variables are read
+    # from the database even on a dry run. --no-db only suppresses the writes.
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        log.error("DATABASE_URL not set — input data cannot be read.")
+        return 1
+    from sqlalchemy import create_engine
+    engine = create_engine(db_url, pool_pre_ping=True)
+    log.info("DB connected: %s", db_url.split("@")[-1])
+    if args.no_db:
+        log.info("--no-db: results will NOT be written to the database")
 
     mlflow_uri = None if args.no_mlflow else os.environ.get("MLFLOW_TRACKING_URI")
 
@@ -130,9 +135,14 @@ def main() -> int:
     if args.no_optimization:
         log.info("=== Optimization skipped (--no-optimization) ===")
     elif args.no_db:
-        log.info("=== Optimization skipped (--no-db flag set) ===")
+        # Without the CF uplifts in results.uplifts there is nothing to optimize.
+        log.info("=== Optimization skipped (--no-db: uplifts were not saved) ===")
     else:
-        log.info("=== Step 4: ILP Optimization [%s] ===", config.optimization.opt_id)
+        n_scen = len(config.optimization.budget_limits)
+        log.info(
+            "=== Step 4: ILP Optimization — %d budget scenario(s) from %s ===",
+            n_scen, config.optimization.opt_id_start,
+        )
         t_opt = time.time()
         try:
             from src.ml.optimizer import run as run_optimizer
@@ -140,13 +150,28 @@ def main() -> int:
 
             opt_result = run_optimizer(config.optimization, engine)
             log.info(
-                "  Optimization: %.1fs | direct=%d | spillover=%d",
+                "  Optimization: %.1fs | %d scenario(s) | uplift rows: direct=%d spillover=%d",
                 time.time() - t_opt,
+                len(opt_result.summary),
                 (opt_result.uplifts_final["treatment"] == "d1nq").sum(),
                 (opt_result.uplifts_final["treatment"] == "1nq").sum(),
             )
 
-            opt_counts = save_optimization(opt_result, engine)
+            objectives = opt_result.summary["objective_function_value"]
+            if objectives.notna().any():
+                best = opt_result.summary.loc[objectives.idxmax()]
+                log.info(
+                    "  Best objective: %.4f at budget %s (%s)",
+                    best["objective_function_value"],
+                    f"{best['cost_limit']:,.0f}",
+                    best["optimization_id"],
+                )
+            else:
+                log.warning("  No scenario returned an objective value.")
+
+            opt_counts = save_optimization(
+                opt_result, engine, purge=config.optimization.purge_previous
+            )
             log.info("  DB: %s", opt_counts)
 
         except Exception as exc:
