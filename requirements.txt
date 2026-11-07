@@ -35,3 +35,6 @@ folium==0.18.0
 streamlit-folium==0.23.1
 branca>=0.7,<1.0
 matplotlib>=3.9,<4.0
+
+# Map tiles for static matplotlib maps (experiments/notebooks/all_results_review.ipynb)
+contextily>=1.5,<2.0
