@@ -64,32 +64,71 @@ def _calculate_effect_significance(df: pd.DataFrame, columns_list: list[str]) ->
     return pd.DataFrame(output)
 
 
-def _build_neighborhood(gdf: gpd.GeoDataFrame) -> dict[int, list[int]]:
+# Two blocks count as rook neighbours when the line they share is at least this
+# long (metres). Guards against slivers where digitised boundaries overlap by a
+# numerically irrelevant amount instead of meeting along a real edge.
+ROOK_MIN_SHARED_EDGE_M = 0.01
+
+
+def _build_neighborhood(
+    gdf: gpd.GeoDataFrame,
+    criterion: str = "rook",
+) -> dict[int, list[int]]:
     """
-    Build adjacency dict {row_index: [neighbor_row_indices]} using spatial join.
-    Falls back from libpysal to geopandas sjoin (predicate='touches').
+    Build adjacency dict {row_index: [neighbor_row_indices]}.
+
+    criterion:
+      "queen" — blocks are neighbours when their boundaries touch at all,
+                a single shared corner point included
+      "rook"  — blocks are neighbours only when they share a boundary segment
+                of positive length, i.e. a common edge
+
+    The distinction matters for the connectivity constraint: under queen a
+    selected area may be joined only at a corner, which is not a contiguous
+    area on the ground.
     """
+    criterion = criterion.lower()
+    if criterion not in {"rook", "queen"}:
+        raise ValueError(f"proximity_criterion='{criterion}' — expected 'rook' or 'queen'")
+
     n = len(gdf)
-    try:
-        from libpysal.weights import Queen
-        w = Queen.from_dataframe(gdf, use_index=False)
-        neigh = {i: sorted(set(w.neighbors[i])) for i in range(n)}
-        log.info("Neighborhood built via libpysal Queen (%d arcs)", sum(len(v) for v in neigh.values()))
-    except Exception:
-        sj = gpd.sjoin(
-            gdf[["geometry"]],
-            gdf[["geometry"]],
-            predicate="touches",
-            how="inner",
-        )
-        neigh: dict[int, list[int]] = {i: [] for i in range(n)}
-        for i, j in zip(sj.index, sj["index_right"]):
-            if i != j:
-                neigh[i].append(int(j))
-        neigh = {i: sorted(set(v)) for i, v in neigh.items()}
-        log.info("Neighborhood built via gpd.sjoin (%d arcs)", sum(len(v) for v in neigh.values()))
+    geoms = gdf.geometry.to_list()
+
+    # Candidate pairs: anything whose boundaries meet. Rook is a subset of queen,
+    # so both criteria start here.
+    sj = gpd.sjoin(
+        gdf[["geometry"]],
+        gdf[["geometry"]],
+        predicate="touches",
+        how="inner",
+    )
+
+    neigh: dict[int, list[int]] = {i: [] for i in range(n)}
+    rejected = 0
+    for i, j in zip(sj.index, sj["index_right"]):
+        i, j = int(i), int(j)
+        if i == j:
+            continue
+        if criterion == "rook":
+            shared = geoms[i].intersection(geoms[j])
+            if shared.is_empty or shared.length < ROOK_MIN_SHARED_EDGE_M:
+                rejected += 1          # contact at a corner only
+                continue
+        neigh[i].append(j)
+    neigh = {i: sorted(set(v)) for i, v in neigh.items()}
+
+    arcs = sum(len(v) for v in neigh.values())
     isolated = sum(1 for i in range(n) if not neigh[i])
-    log.info("Blocks: %d | isolated: %d", n, isolated)
+    log.info(
+        "Neighborhood (%s): %d blocks | %d arcs | %d isolated%s",
+        criterion, n, arcs, isolated,
+        f" | {rejected} corner-only contacts dropped" if criterion == "rook" else "",
+    )
+    if isolated:
+        log.warning(
+            "%d block(s) have no %s neighbour — they can only be selected as a "
+            "single-block cluster.", isolated, criterion,
+        )
     return neigh
 
 
@@ -142,9 +181,29 @@ def _solve_scenario(
     n_clusters: int,
     spill_on_treated: bool,
     time_limit: int,
+    neigh_spill: dict[int, list[int]] | None = None,
+    warm_start: dict[str, float] | None = None,
 ) -> dict:
     """
     Solve the MILP for a single budget limit.
+
+    Two neighbourhoods are used, because contiguity and spillover are not the
+    same relation:
+
+      neigh       — drives the connectivity constraint, i.e. which blocks may
+                    be joined into the directly treated cluster. Normally rook:
+                    a shared edge is required, a shared corner is not enough to
+                    call two blocks one contiguous area.
+      neigh_spill — drives the spillover constraint, i.e. which blocks pick up
+                    an indirect effect from a treated neighbour. Normally
+                    queen: an effect crosses a corner just as it crosses an
+                    edge. Defaults to neigh when not given.
+
+    warm_start is a {variable_name: value} map from an earlier solve. Because
+    the budget only ever grows along the ladder and no other constraint
+    changes, a solution feasible at a smaller budget stays feasible here, so it
+    can be handed to CBC as a MIP start: the solver begins from it rather than
+    from nothing and can only improve on it.
 
     Module-level and self-contained so joblib's loky backend can ship it to a
     worker process. CBC is an external process, so threads=... is deliberately
@@ -152,6 +211,9 @@ def _solve_scenario(
     """
     import pulp
     import numpy as np  # re-imported: runs in a separate process
+
+    if neigh_spill is None:
+        neigh_spill = neigh
 
     prob = pulp.LpProblem(f"revitalization_{opt_id}", pulp.LpMaximize)
 
@@ -170,11 +232,13 @@ def _solve_scenario(
     # Budget (direct treatment cost only)
     prob += pulp.lpSum(cost[i] * x[i] for i in range(n)) <= cost_limit, "budget"
 
-    # Spillover: y_i = 1 only if at least one neighbour is treated
+    # Spillover: y_i = 1 only if at least one neighbour is treated.
+    # Uses neigh_spill (queen), so a block touching a treated block at a corner
+    # still receives the indirect effect.
     BIG = n
     for i in range(n):
-        if neigh[i]:
-            prob += y[i] <= pulp.lpSum(x[j] for j in neigh[i]), f"spill_{i}"
+        if neigh_spill[i]:
+            prob += y[i] <= pulp.lpSum(x[j] for j in neigh_spill[i]), f"spill_{i}"
         else:
             prob += y[i] == 0, f"spill_{i}"
         if not spill_on_treated:
@@ -194,22 +258,173 @@ def _solve_scenario(
 
     prob += pulp.lpSum(r[i] for i in range(n)) == n_clusters, "n_roots"
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit))
+    used_warm_start = False
+    if warm_start:
+        # The whole variable vector is replayed, flow and supply included — a
+        # partial start would leave CBC to repair the flow itself.
+        for var in prob.variables():
+            value = warm_start.get(var.name)
+            if value is not None:
+                var.setInitialValue(float(value))
+        used_warm_start = True
+
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit,
+                                 warmStart=used_warm_start))
+
+    solver_status   = pulp.LpStatus[prob.status]
+    solution_status = pulp.LpSolution[prob.sol_status]
+
+    # A run that hits the time limit before finding any integer solution still
+    # leaves fractional values on the variables. Rounding those would produce a
+    # selection that violates the budget, so such a run is reported as a
+    # failure rather than as a result.
+    has_integer_solution = prob.sol_status in (
+        pulp.LpSolutionOptimal,
+        pulp.LpSolutionIntegerFeasible,
+    )
+
+    empty = np.zeros(n, dtype=bool)
+    if not has_integer_solution:
+        return {
+            "optimization_id": opt_id,
+            "cost_limit":      float(cost_limit),
+            "solver_status":   solver_status,
+            "solution_status": solution_status,
+            "objective":       None,
+            "sel":             empty,
+            "spil":            empty.copy(),
+            "warm_started":    used_warm_start,
+            "vector":          None,
+        }
 
     sel  = np.array([int(round(x[i].value() or 0)) for i in range(n)], dtype=bool)
     spil = np.array([int(round(y[i].value() or 0)) for i in range(n)], dtype=bool)
+
+    # Safety net: the budget must hold for the rounded selection as well.
+    cost_used = float(np.asarray(cost)[sel].sum())
+    if cost_used > float(cost_limit) + 1e-6:
+        return {
+            "optimization_id": opt_id,
+            "cost_limit":      float(cost_limit),
+            "solver_status":   solver_status,
+            "solution_status": f"Rejected: cost {cost_used:.0f} over budget",
+            "objective":       None,
+            "sel":             empty,
+            "spil":            empty.copy(),
+            "warm_started":    used_warm_start,
+            "vector":          None,
+        }
 
     objective = pulp.value(prob.objective)
 
     return {
         "optimization_id": opt_id,
         "cost_limit":      float(cost_limit),
-        "solver_status":   pulp.LpStatus[prob.status],
-        "solution_status": pulp.LpSolution[prob.sol_status],
+        "solver_status":   solver_status,
+        "solution_status": solution_status,
         "objective":       None if objective is None else float(objective),
         "sel":             sel,
         "spil":            spil & ~sel,
+        "warm_started":    used_warm_start,
+        # full variable vector, so this solution can seed the next budget step
+        "vector":          {v.name: v.varValue for v in prob.variables()
+                            if v.varValue is not None},
     }
+
+
+def _objective_of(result: dict | None) -> float:
+    """Objective of a solve, with a failed or missing solve ranked last."""
+    if result is None or result.get("objective") is None:
+        return float("-inf")
+    return float(result["objective"])
+
+
+def _run_ladder(config: OptimizationConfig, solve_args: dict,
+                budget_limits: list[float], opt_ids: list[str]) -> list[dict]:
+    """
+    Sequential ladder over the budget range.
+
+    Step 1 solves the smallest budget from scratch; its solution becomes the
+    incumbent. Every later step runs two solves in parallel at the next budget
+    — one seeded with the incumbent, one from scratch — and the incumbent
+    itself is carried forward as a third candidate, since it remains feasible
+    once the budget grows. The best of the three becomes the new incumbent.
+
+    This is what makes the objective non-decreasing in the budget. In the plain
+    parallel sweep every scenario started cold, so a harder instance could end
+    the time limit on a worse feasible solution than a smaller budget had
+    found, and the curve dipped. Here a step can never report less than the
+    previous one, because the previous solution is always among the candidates.
+    """
+    from joblib import Parallel, delayed
+
+    n_workers = max(1, min(2, config.n_jobs))
+    results: list[dict] = []
+    incumbent: dict | None = None
+
+    for step, (limit, opt_id) in enumerate(zip(budget_limits, opt_ids), start=1):
+        branches: list[tuple[str, dict | None]] = []
+        if incumbent is not None:
+            branches.append(("warm", incumbent["vector"]))
+        branches.append(("cold", None))
+
+        log.info(
+            "--- step %d/%d  %s  budget %s  (%s)",
+            step, len(budget_limits), opt_id, f"{limit:,.0f}",
+            " + ".join(tag for tag, _ in branches),
+        )
+
+        solved = Parallel(n_jobs=min(len(branches), n_workers), backend="loky")(
+            delayed(_solve_scenario)(
+                limit, f"{opt_id}_{tag}", **solve_args,
+                time_limit=config.time_limit, warm_start=vector,
+            )
+            for tag, vector in branches
+        )
+        candidates = list(zip([tag for tag, _ in branches], solved))
+
+        if incumbent is not None:
+            carried = dict(incumbent)
+            carried.update(
+                cost_limit=float(limit),
+                solver_status="CarriedForward",
+                solution_status="Previous step reused",
+                warm_started=False,
+            )
+            candidates.append(("carried", carried))
+
+        for tag, res in candidates:
+            log.info(
+                "      %-8s objective=%s  direct=%d  spillover=%d  %s",
+                tag,
+                "n/a" if res["objective"] is None else f"{res['objective']:.4f}",
+                int(res["sel"].sum()), int(res["spil"].sum()),
+                res["solver_status"],
+            )
+
+        best_tag, best = max(candidates, key=lambda c: _objective_of(c[1]))
+        best = dict(best)
+        best["optimization_id"] = opt_id
+        best["cost_limit"] = float(limit)
+
+        if _objective_of(best) == float("-inf"):
+            # No branch produced an integer solution within the time limit.
+            best["branch"] = "failed"
+            log.warning(
+                "      -> no branch found an integer solution at %s; "
+                "raise time_limit if this repeats", f"{limit:,.0f}",
+            )
+        else:
+            best["branch"] = best_tag
+            log.info("      -> kept '%s'", best_tag)
+
+        results.append(best)
+        # A failed step must not discard a working incumbent — the next step
+        # can still be seeded from the last solution that did solve.
+        if best.get("vector") and best.get("objective") is not None:
+            incumbent = best
+
+    return results
 
 
 def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
@@ -468,17 +683,42 @@ def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
             f"for rf_model_id='{config.rf_model_id}'."
         )
 
-    neigh = _build_neighborhood(gdf)
+    # Two neighbourhoods, because contiguity and spillover are different
+    # relations: the directly treated blocks have to form one area joined along
+    # edges, while the indirect effect also crosses a corner.
+    log.info("Contiguity of the treated cluster:")
+    neigh = _build_neighborhood(gdf, config.proximity_criterion)
     arcs  = [(i, j) for i in range(n) for j in neigh[i]]
 
-    # ── 8. Parallel budget sweep ──────────────────────────────────────────────
-    from joblib import Parallel, delayed
+    if config.spillover_criterion == config.proximity_criterion:
+        neigh_spill = neigh
+    else:
+        log.info("Spillover reach:")
+        neigh_spill = _build_neighborhood(gdf, config.spillover_criterion)
 
+    extra_spill = sum(
+        len(set(neigh_spill[i]) - set(neigh[i])) for i in range(n)
+    )
+    log.info(
+        "Spillover reaches %d block pair(s) that are not contiguous "
+        "(corner-only contacts)", extra_spill,
+    )
+
+    # ── 8. Budget sweep ───────────────────────────────────────────────────────
     budget_limits = config.budget_limits
     opt_ids       = config.opt_ids
+    solve_args = dict(a=a, b=b, cost=cost, neigh=neigh, neigh_spill=neigh_spill,
+                      arcs=arcs, n=n,
+                      n_clusters=config.n_clusters,
+                      spill_on_treated=config.spill_on_treated)
+
     log.info(
-        "Solving %d ILP scenarios (n=%d, arcs=%d) — n_jobs=%d, time_limit=%ds each",
-        len(budget_limits), n, len(arcs), config.n_jobs, config.time_limit,
+        "Solving %d ILP scenarios (n=%d, arcs=%d, contiguity=%s, spillover=%s) — "
+        "%s, time_limit=%ds per solve",
+        len(budget_limits), n, len(arcs),
+        config.proximity_criterion, config.spillover_criterion,
+        "sequential ladder" if config.sequential else f"parallel, n_jobs={config.n_jobs}",
+        config.time_limit,
     )
     log.info(
         "Budget range: %s .. %s step %s",
@@ -487,22 +727,41 @@ def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
         f"{config.budget_step:,.0f}",
     )
 
-    scenario_results = Parallel(n_jobs=config.n_jobs, backend="loky", verbose=5)(
-        delayed(_solve_scenario)(
-            cost_limit, opt_id, a, b, cost, neigh, arcs, n,
-            config.n_clusters, config.spill_on_treated, config.time_limit,
+    if config.sequential:
+        scenario_results = _run_ladder(config, solve_args, budget_limits, opt_ids)
+    else:
+        from joblib import Parallel, delayed
+        scenario_results = Parallel(n_jobs=config.n_jobs, backend="loky", verbose=5)(
+            delayed(_solve_scenario)(
+                cost_limit, opt_id, **solve_args, time_limit=config.time_limit,
+            )
+            for cost_limit, opt_id in zip(budget_limits, opt_ids)
         )
-        for cost_limit, opt_id in zip(budget_limits, opt_ids)
-    )
+        for res_k in scenario_results:
+            res_k["branch"] = "cold"
 
     for res_k in scenario_results:
         log.info(
-            "  %s  budget=%12.0f  %s / %s  objective=%s  direct=%d  spillover=%d",
+            "  %s  budget=%12.0f  %-14s %-24s objective=%s  direct=%d  spillover=%d  [%s]",
             res_k["optimization_id"], res_k["cost_limit"],
             res_k["solver_status"], res_k["solution_status"],
             "n/a" if res_k["objective"] is None else f"{res_k['objective']:.4f}",
             int(res_k["sel"].sum()), int(res_k["spil"].sum()),
+            res_k.get("branch", "?"),
         )
+
+    objectives = [r["objective"] for r in scenario_results]
+    drops = [
+        (scenario_results[i]["optimization_id"], objectives[i], objectives[i + 1])
+        for i in range(len(objectives) - 1)
+        if objectives[i] is not None and objectives[i + 1] is not None
+        and objectives[i + 1] < objectives[i] - 1e-9
+    ]
+    if drops:
+        log.warning("Objective decreased on %d step(s) despite the ladder: %s",
+                    len(drops), drops)
+    else:
+        log.info("Objective is non-decreasing across the whole budget range.")
 
     # ── 9. Assemble per-scenario uplift rows ─────────────────────────────────
     uplifts_tagged = uplifts_df.copy()
@@ -551,6 +810,8 @@ def run(config: OptimizationConfig, engine: Engine) -> OptimizationResult:
             "objective_function_value": res_k["objective"],
             "solver_status":            res_k["solver_status"],
             "solution_status":          res_k["solution_status"],
+            "proximity_criterion":      config.proximity_criterion,
+            "spillover_criterion":      config.spillover_criterion,
             "treatment_spillovers":     config.spill_on_treated,
             "clusters_number":          config.n_clusters,
             "time_limit":               config.time_limit,

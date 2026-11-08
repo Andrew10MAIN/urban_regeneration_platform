@@ -65,9 +65,14 @@ models:
 
 # --- Optimization (ILP — PuLP CBC, parallel budget sweep) --------------------
 optimization:
-  # Optimization ids are generated sequentially from this one:
-  # OP00000000001, OP00000000002, ... one per budget scenario.
-  opt_id_start: "OP00000000001"
+  # Optimization ids are generated sequentially from this one, one per budget
+  # scenario. Ranges used so far:
+  #   OP00000000001 - OP00000000051   queen, parallel sweep, 240 s     (kept)
+  #   OP00000000052 - OP00000000054   rook ladder, 30 s, test run      (discard)
+  #   OP00000000101 - OP00000000151   rook ladder, 240 s, full sweep
+  # Pick a start that does not collide with a range you want to keep: with
+  # purge_previous off, an existing id is overwritten rather than added.
+  opt_id_start: "OP00000000101"
   rf_model_id: "RF00000000001"   # which RF cost model supplies block costs
 
   # Budget sweep (PLN). budget_max is exclusive, like Python range().
@@ -76,10 +81,40 @@ optimization:
   budget_max:  500_000_001
   budget_step:   5_000_000
 
-  # Parallelism: how many ILP problems are solved at once, and the CBC time
-  # limit for a single problem (seconds). 12 jobs x 240 s.
-  n_jobs: 12
+  # Sequential ladder. Step 1 solves the lowest budget from scratch. Every
+  # later step runs two solves in parallel at the next budget — one seeded with
+  # the previous winner, one from scratch — and also keeps the previous
+  # solution itself as a candidate, since a larger budget cannot make it
+  # infeasible. The best of the three carries on. This is what stops the
+  # objective from dropping when a harder instance hits the time limit.
+  # Set to false for the earlier behaviour: every scenario cold, all at once.
+  sequential: true
+
+  # CBC time limit for a single solve (seconds). With the ladder at most two
+  # solves run at a time, so n_jobs above 2 changes nothing in that mode.
+  #
+  # The ladder is sequential, so the whole sweep takes roughly
+  # n_scenarios x time_limit: 51 x 240 s is about 3 h 25 min. Step 1 is the
+  # only one without a warm start and therefore the most likely to run out of
+  # time; at 30 s it failed, at 240 s the earlier queen sweep solved every
+  # scenario.
+  n_jobs: 2
   time_limit: 240
+
+  # Contiguity and spillover are different relations, so they use different
+  # adjacency rules.
+  #
+  # proximity_criterion — how the directly treated blocks may be joined into
+  #   one area. rook: a shared boundary segment of positive length is required,
+  #   so a corner contact does not make two blocks one contiguous area.
+  #
+  # spillover_criterion — which blocks pick up the indirect effect from a
+  #   treated neighbour. queen: the effect crosses a corner as readily as an
+  #   edge, so it is not limited by the contiguity rule.
+  #
+  # Runs up to and including OP00000000051 used queen for both.
+  proximity_criterion: "rook"
+  spillover_criterion: "queen"
 
   spill_on_treated: true         # allow spillover on directly-treated blocks
   n_clusters: 1                  # number of connected components in solution
@@ -88,10 +123,14 @@ optimization:
   # with a negative uplift lowers the objective function instead of raising it.
   normalize: true
 
-  # Delete previous rows from results.optimization_summary,
-  # results.optimization_weights_setup and results.uplifts_optimization
-  # before writing this sweep. Prevents mixing scenarios across runs.
-  purge_previous: true
+  # Delete every previous row from results.optimization_summary,
+  # results.optimization_weights_setup and results.uplifts_optimization before
+  # writing this sweep.
+  #
+  # Off, so that the queen runs OP00000000001-051 stay in the database and can
+  # be compared against the rook ladder. With it off, make sure opt_id_start
+  # does not reuse ids you want to keep — they would be overwritten in place.
+  purge_previous: false
 
   # Objective-function weights, one per uplift column — i.e. per
   # (target_variable, treatment) pair. Column naming: <target>_<treatment>,

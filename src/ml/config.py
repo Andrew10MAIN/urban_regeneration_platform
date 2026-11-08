@@ -70,6 +70,19 @@ class OptimizationConfig:
 
     spill_on_treated: bool = True
     n_clusters: int = 1
+    # Contiguity of the directly treated cluster:
+    #   "rook"  — blocks must share a boundary segment of positive length
+    #   "queen" — a shared corner point is enough
+    proximity_criterion: str = "rook"
+    # Reach of the indirect effect around the treated cluster. Queen by
+    # default: a spillover crosses a corner even though a corner does not make
+    # two blocks one contiguous area.
+    spillover_criterion: str = "queen"
+    # True runs the budgets as a ladder: each step seeds one solve with the
+    # previous winner and runs a second from scratch, keeping the better of the
+    # two (and of the previous solution itself). Guarantees a non-decreasing
+    # objective. False restores the earlier all-cold parallel sweep.
+    sequential: bool = True
     # Scale uplift columns by max|value| before the ILP (sign preserved, so a
     # negative uplift lowers the objective).
     normalize: bool = True
@@ -123,9 +136,11 @@ class OptimizationConfig:
             f"  opt_id_start={self.opt_id_start}  rf_model_id={self.rf_model_id}\n"
             f"  budgets: {len(limits)} scenarios  "
             f"{limits[0]:,.0f} .. {limits[-1]:,.0f}  step {self.budget_step:,.0f}\n"
-            f"  n_jobs={self.n_jobs}  time_limit={self.time_limit}s  "
-            f"n_clusters={self.n_clusters}  normalize={self.normalize}  "
-            f"purge_previous={self.purge_previous}\n"
+            f"  mode={'sequential ladder' if self.sequential else 'parallel'}  "
+            f"n_jobs={self.n_jobs}  time_limit={self.time_limit}s\n"
+            f"  contiguity={self.proximity_criterion}  "
+            f"spillover={self.spillover_criterion}  n_clusters={self.n_clusters}  "
+            f"normalize={self.normalize}  purge_previous={self.purge_previous}\n"
             f"  targets={self.target_variables}\n"
             f"  normalize_weights={self.normalize_weights}  "
             f"uplift_weights={self.uplift_weights}"
@@ -202,6 +217,9 @@ class PipelineConfig:
             time_limit=int(opt_raw.get("time_limit", 240)),
             spill_on_treated=opt_raw.get("spill_on_treated", True),
             n_clusters=int(opt_raw.get("n_clusters", 1)),
+            proximity_criterion=str(opt_raw.get("proximity_criterion", "rook")).lower(),
+            spillover_criterion=str(opt_raw.get("spillover_criterion", "queen")).lower(),
+            sequential=opt_raw.get("sequential", True),
             normalize=opt_raw.get("normalize", True),
             purge_previous=opt_raw.get("purge_previous", False),
             normalize_weights=opt_raw.get("normalize_weights", True),

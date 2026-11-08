@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS results.optimization_summary (
     objective_function_value DOUBLE PRECISION,
     solver_status            TEXT,
     solution_status          TEXT,
+    -- Contiguity of the directly treated cluster:
+    --   'rook'  = blocks must share a boundary segment of positive length
+    --   'queen' = touching at a single corner point is enough
+    proximity_criterion      TEXT,
+    -- Reach of the indirect effect around that cluster, normally 'queen':
+    -- a spillover crosses a corner even where contiguity does not.
+    spillover_criterion      TEXT,
     treatment_spillovers     BOOLEAN,
     clusters_number          INTEGER,
     time_limit               INTEGER,

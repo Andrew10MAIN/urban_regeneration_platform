@@ -151,18 +151,22 @@ def _upsert_optimization_summary(df: pd.DataFrame, engine: Engine) -> int:
     sql = text("""
         INSERT INTO results.optimization_summary
             (optimization_id, cost_used, cost_limit, objective_function_value,
-             solver_status, solution_status, treatment_spillovers,
-             clusters_number, time_limit, run_at)
+             solver_status, solution_status, proximity_criterion,
+             spillover_criterion, treatment_spillovers, clusters_number,
+             time_limit, run_at)
         VALUES
             (:optimization_id, :cost_used, :cost_limit, :objective_function_value,
-             :solver_status, :solution_status, :treatment_spillovers,
-             :clusters_number, :time_limit, :run_at)
+             :solver_status, :solution_status, :proximity_criterion,
+             :spillover_criterion, :treatment_spillovers, :clusters_number,
+             :time_limit, :run_at)
         ON CONFLICT (optimization_id) DO UPDATE SET
             cost_used                = EXCLUDED.cost_used,
             cost_limit               = EXCLUDED.cost_limit,
             objective_function_value = EXCLUDED.objective_function_value,
             solver_status            = EXCLUDED.solver_status,
             solution_status          = EXCLUDED.solution_status,
+            proximity_criterion      = EXCLUDED.proximity_criterion,
+            spillover_criterion      = EXCLUDED.spillover_criterion,
             treatment_spillovers     = EXCLUDED.treatment_spillovers,
             clusters_number          = EXCLUDED.clusters_number,
             time_limit               = EXCLUDED.time_limit,

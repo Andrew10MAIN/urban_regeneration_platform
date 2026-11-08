@@ -6,6 +6,11 @@ Usage (inside Docker):
     python src/ml/run_pipeline.py --config configs/ml/default_run.yaml --no-optimization
     python src/ml/run_pipeline.py --config configs/ml/default_run.yaml --no-db --no-mlflow
 
+    # optimization only, on the CF uplifts already stored in the database
+    python src/ml/run_pipeline.py --config configs/ml/default_run.yaml --no-models
+    # the same, read-only (nothing written, nothing purged)
+    python src/ml/run_pipeline.py --config configs/ml/default_run.yaml --no-models --no-db
+
 Environment variables:
     DATABASE_URL         — SQLAlchemy connection string (required unless --no-db)
     MLFLOW_TRACKING_URI  — MLflow server URI (optional)
@@ -47,6 +52,10 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--no-mlflow",       action="store_true", help="Skip MLflow logging")
     p.add_argument("--no-optimization", action="store_true", help="Skip ILP optimization step")
+    p.add_argument(
+        "--no-models", action="store_true",
+        help="Skip CF training and optimize on the uplifts already in the database",
+    )
     return p.parse_args()
 
 
@@ -95,10 +104,22 @@ def main() -> int:
     t0 = time.time()
     all_ok = True
 
-    for i, model_cfg in enumerate(config.model_configs, 1):
+    model_configs = config.model_configs
+    if args.no_models:
+        # Reuse the CF models already in results.models / results.uplifts.
+        # Useful when only the optimization settings changed, since retraining
+        # would overwrite uplifts that the optimization is meant to consume.
+        log.info(
+            "=== CF training skipped (--no-models) — using the uplifts already "
+            "in the database for: %s ===",
+            ", ".join(f"{m.model_id}/{m.target_variable}" for m in model_configs),
+        )
+        model_configs = []
+
+    for i, model_cfg in enumerate(model_configs, 1):
         log.info(
             "=== Model %d/%d: %s  target=%s ===",
-            i, len(config.model_configs),
+            i, len(model_configs),
             model_cfg.model_id, model_cfg.target_variable,
         )
         t_model = time.time()
@@ -134,8 +155,11 @@ def main() -> int:
     # ── Step 4: ILP Optimization ──────────────────────────────────────────────
     if args.no_optimization:
         log.info("=== Optimization skipped (--no-optimization) ===")
-    elif args.no_db:
-        # Without the CF uplifts in results.uplifts there is nothing to optimize.
+    elif args.no_db and not args.no_models:
+        # The models were just retrained but not saved, so results.uplifts still
+        # holds the previous run — optimizing on it would mix two model sets.
+        # With --no-models nothing was retrained, so the database is consistent
+        # and the optimization can run read-only.
         log.info("=== Optimization skipped (--no-db: uplifts were not saved) ===")
     else:
         n_scen = len(config.optimization.budget_limits)
@@ -169,10 +193,13 @@ def main() -> int:
             else:
                 log.warning("  No scenario returned an objective value.")
 
-            opt_counts = save_optimization(
-                opt_result, engine, purge=config.optimization.purge_previous
-            )
-            log.info("  DB: %s", opt_counts)
+            if args.no_db:
+                log.info("  --no-db: optimization results NOT written to the database")
+            else:
+                opt_counts = save_optimization(
+                    opt_result, engine, purge=config.optimization.purge_previous
+                )
+                log.info("  DB: %s", opt_counts)
 
         except Exception as exc:
             log.exception("Optimization failed: %s", exc)
